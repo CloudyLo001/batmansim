@@ -1,0 +1,55 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # Lets a failed first run be retried from the Actions tab once Pages is on.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; in-flight runs lose to the newest commit.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Vite 8 wants a newer runtime than the repo's local Node 20.16.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # package.json's build is "tsc && vite build", so a type error fails the
+      # deploy rather than shipping a broken bundle.
+      - run: npm run build
+
+      - uses: actions/configure-pages@v5
+        with:
+          # Turns Pages on and points it at Actions, so no manual setup is
+          # needed if the token is allowed to do it.
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

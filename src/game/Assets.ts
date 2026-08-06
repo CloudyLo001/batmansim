@@ -4,31 +4,41 @@ import { createMintGltfLoader } from '../assets/gltf-runtime';
 import type { BatmanClipRole } from '../entities/Batman';
 
 /**
+ * Resolves a public-directory path against the deployment base.
+ *
+ * These must NOT be root-absolute. GitHub Pages serves the site from
+ * /batmansim/, so "/assets/..." would look outside the project and 404 every
+ * model. `import.meta.env.BASE_URL` is "/" under the dev server and carries a
+ * trailing slash in both cases.
+ */
+const asset = (path: string): string => `${import.meta.env.BASE_URL}${path}`;
+
+/**
  * Browser URLs for the synchronized Mint artifacts recorded in
- * mint-assets.json (Vite public root: public/assets/mint/... -> /assets/mint/...).
+ * mint-assets.json (Vite public root: public/assets/mint/... -> assets/mint/...).
  */
 export const ASSET_URLS = {
   // Skinned character produced by Mint's rigging pass, plus its clips.
-  batmanModel: '/assets/mint/batman-hero/rigged_character_glb.glb',
+  batmanModel: asset('assets/mint/batman-hero/rigged_character_glb.glb'),
   batmanClips: {
-    falling: '/assets/mint/batman-hero/clip_falling.glb',
-    diveLand: '/assets/mint/batman-hero/clip_dive_land.glb',
-    crouch: '/assets/mint/batman-hero/clip_crouch.glb',
+    falling: asset('assets/mint/batman-hero/clip_falling.glb'),
+    diveLand: asset('assets/mint/batman-hero/clip_dive_land.glb'),
+    crouch: asset('assets/mint/batman-hero/clip_crouch.glb'),
   },
   // The optimized re-encode: the original GLB stalls GLTFLoader's parse.
-  cape: '/assets/mint/cloak/optimized_glb.glb',
-  blimp: '/assets/mint/blimp/original_glb.glb',
-  signalTower: '/assets/mint/signal-tower/original_glb.glb',
+  cape: asset('assets/mint/cloak/optimized_glb.glb'),
+  blimp: asset('assets/mint/blimp/original_glb.glb'),
+  signalTower: asset('assets/mint/signal-tower/original_glb.glb'),
   city: {
-    spire: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-0-ks75vafmeth6gkc7xts3r11t558bv2nj.glb',
-    slab: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-1-ks70je1p7kv2gb733rm7mb13v98bvgjc.glb',
-    twin: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-2-ks7bpcz4m42vj9kwp1mn29r6wx8btjpn.glb',
-    neonBlock: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-3-ks7cdm7zx2wd8kb8msn57q05618btatf.glb',
-    industrial: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-4-ks7eq04kmtsmz6ekgphkm6ksv58bvpb7.glb',
-    bridge: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-5-ks7cx9w8pmkremjraxkr26e5jx8bvdy3.glb',
-    ferrisWheel: '/assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-6-ks7em6e2ktwsg4qhs0ahm7ezfs8bt8dq.glb',
+    spire: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-0-ks75vafmeth6gkc7xts3r11t558bv2nj.glb'),
+    slab: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-1-ks70je1p7kv2gb733rm7mb13v98bvgjc.glb'),
+    twin: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-2-ks7bpcz4m42vj9kwp1mn29r6wx8btjpn.glb'),
+    neonBlock: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-3-ks7cdm7zx2wd8kb8msn57q05618btatf.glb'),
+    industrial: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-4-ks7eq04kmtsmz6ekgphkm6ksv58bvpb7.glb'),
+    bridge: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-5-ks7cx9w8pmkremjraxkr26e5jx8bvdy3.glb'),
+    ferrisWheel: asset('assets/mint/city-pack/asset_pack_item_glb-vd7cxkype8hjmjh2dz3cd04pa58btdj9-6-ks7em6e2ktwsg4qhs0ahm7ezfs8bt8dq.glb'),
   },
-  skybox: '/assets/mint/storm-sky/image_file.png',
+  skybox: asset('assets/mint/storm-sky/image_file.png'),
 };
 
 export interface LoadedAssets {
