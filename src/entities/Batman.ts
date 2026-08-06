@@ -15,6 +15,16 @@ export type BatmanState =
 
 const TARGET_HEIGHT = 2.05;
 
+/**
+ * How far behind the shoulder joints the cape's collar sits, in metres.
+ *
+ * Local -Z is "off his back" — it becomes world-up once he is belly-down — so
+ * this lifts the garment clear instead of letting it cut through his shoulder
+ * blades. The arm bones already sit ~0.12 back of his centreline, so the collar
+ * lands around -0.18 overall.
+ */
+const CAPE_BACK_CLEARANCE = 0.06;
+
 interface PoseTargets {
   /** Wing spread: 0 furled cloak, 1 full glide, >1 flared. */
   spread: number;
@@ -130,6 +140,7 @@ export class Batman {
     this.group.add(this.pivot);
     // Parented to the body, so the cape can never drift or lag behind it.
     this.pivot.add(this.wing.group);
+    this.anchorCapeToShoulders();
 
     const rim = new THREE.PointLight(0xb6d0ea, 95, 40, 2);
     rim.position.set(1.6, 7.5, 2.5);
@@ -203,6 +214,36 @@ export class Batman {
 
   /** Kept for phase transitions; the parented cape needs no re-seating. */
   resetWing(): void {}
+
+  /**
+   * Clasps the cape across the shoulder line, measured from the rig in its bind
+   * pose rather than hardcoded.
+   *
+   * Beware the spine chain: this skeleton numbers it from the top down, so
+   * `spine02` is the LOWEST of the three (just above the hips at y 1.26) and is
+   * not a shoulder proxy. The arm bones are the shoulder joints; the neck is
+   * the fallback, and failing both the cape keeps its own default.
+   */
+  private anchorCapeToShoulders(): void {
+    const { leftArm, rightArm, neck } = this.rig;
+    this.pivot.updateWorldMatrix(true, true);
+
+    const anchor = new THREE.Vector3();
+    if (leftArm && rightArm) {
+      anchor
+        .copy(leftArm.getWorldPosition(new THREE.Vector3()))
+        .add(rightArm.getWorldPosition(new THREE.Vector3()))
+        .multiplyScalar(0.5);
+    } else if (neck) {
+      neck.getWorldPosition(anchor);
+    } else {
+      return;
+    }
+
+    this.pivot.worldToLocal(anchor);
+    anchor.z -= CAPE_BACK_CLEARANCE;
+    this.wing.setAnchor(anchor);
+  }
 
   dispose(): void {
     this.mixer.stopAllAction();

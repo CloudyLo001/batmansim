@@ -9,12 +9,14 @@ const TARGET_SPAN = 4.9;
  */
 const COLLAR_LOCAL = new THREE.Vector3(0.003, 0.314, -0.175);
 /**
- * Where the collar pins onto the body. Sits a little below the neck joint and
- * slightly off the back: local +Y is forward in prone flight, so dropping it
- * lets the cowl and shoulders clear the cape's leading edge, and the small -Z
- * lifts the garment off his back rather than intersecting it.
+ * Fallback collar position, in the parent's local space. Batman normally
+ * overrides this via `setAnchor` with a point measured off the rig's shoulder
+ * bones; this only applies if the skeleton has neither arm nor neck bones.
+ *
+ * Local +Y is up the standing body (it becomes "forward" once he goes prone),
+ * and the small -Z lifts the garment off his back rather than intersecting it.
  */
-const NECK_ANCHOR = new THREE.Vector3(0, 1.3, -0.16);
+const DEFAULT_ANCHOR = new THREE.Vector3(0, 1.6, -0.18);
 /**
  * Drape-depth compression. The garment was authored hanging, and its sag axis
  * becomes world-down in prone flight — at full depth the wings droop ~2 m
@@ -110,10 +112,20 @@ export class CapeWing {
 
     this.mesh = new THREE.Mesh(this.geometry, material);
     this.mesh.frustumCulled = false;
-    // Collar pinned to the back of the neck: the body sits inside the cape and
-    // only the head clears the leading edge.
-    this.mesh.position.copy(NECK_ANCHOR);
+    this.mesh.position.copy(DEFAULT_ANCHOR);
     this.group.add(this.mesh);
+  }
+
+  /**
+   * Pins the collar at `point` in the parent's local space, so the garment
+   * hangs from there by its own neck ring.
+   *
+   * Measured off the hero's skeleton rather than hardcoded: the previous fixed
+   * constant had drifted 0.3 m down his spine and clasped the cape to his lower
+   * back instead of his shoulders.
+   */
+  setAnchor(point: THREE.Vector3): void {
+    this.mesh.position.copy(point);
   }
 
   update(delta: number): void {
