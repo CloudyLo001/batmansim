@@ -57,8 +57,12 @@ export class CameraRig {
     this.applyShake(delta, diveAmount);
     this.lookTarget.copy(position).add(this.smoothedLookOffset);
     this.camera.lookAt(this.lookTarget);
-    // A slice of the body roll leans the horizon into turns.
-    this.camera.rotateZ(roll * 0.3);
+    // A slice of the body roll leans the horizon into turns. NEGATED because
+    // camera Z points back at the viewer, so rolling the camera by +roll spins
+    // the world the wrong way: the horizon dropped on the outside of the turn
+    // while the body leaned into it, and that mixed signal read as inverted
+    // steering far more strongly than the body pose did.
+    this.camera.rotateZ(-roll * 0.3);
 
     const targetFov = THREE.MathUtils.lerp(BASE_FOV, DIVE_FOV, diveAmount);
     this.setFov(THREE.MathUtils.damp(this.camera.fov, targetFov, 4, delta));

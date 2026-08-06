@@ -26,7 +26,6 @@ for (let i = 0; i < 14; i += 1) {
     return {
       phase: d?.phase,
       frame: d?.frame,
-      perch: dbg?.perchPoint?.toArray().map((v) => +v.toFixed(1)),
       heroY: +(dbg?.batman?.group.position.y ?? 0).toFixed(1),
     };
   });

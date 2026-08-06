@@ -2,14 +2,25 @@ import * as THREE from 'three';
 import type { InputController } from '../core/InputController';
 import { WORLD } from '../game/World';
 
-export interface FlightSample {
-  /** Highest obstruction height near a point, used as a soft floor. */
-  groundHeightAt(x: number, z: number): number;
-}
+/**
+ * How far the body leans at full steer, and how hard that lean pulls the nose
+ * around. The two SIGNS are separate on purpose.
+ *
+ * `roll` is applied about the model's own forward axis while `heading` turns
+ * about world Y, and those two conventions run opposite to each other here. So
+ * a single "flip the sign to swap A and D" edit mirrors BOTH and lands on
+ * "turns right, leans left" — wrong in a new way. Each sign below was fixed
+ * against what the camera actually shows (scripts/qa-steering.mjs projects the
+ * hero through the real camera and asserts on screen-space coordinates); do not
+ * re-derive either one from the world axes.
+ */
+const ROLL_AT_FULL_STEER = THREE.MathUtils.degToRad(58);
+const YAW_RATE_PER_ROLL = -1.05;
 
 /**
- * Arcade glide model. Mouse X banks (roll drives yaw), mouse Y trims pitch,
- * holding LMB dives for speed which converts to a swoop on release.
+ * Arcade glide model. A/D bank (roll drives yaw), W/S trim pitch, holding
+ * Shift dives for speed which converts to a swoop on release. Keyboard only —
+ * the mouse does not steer.
  */
 export class FlightModel {
   readonly position = new THREE.Vector3();
@@ -34,23 +45,21 @@ export class FlightModel {
     this.updateVelocity();
   }
 
-  update(delta: number, input: InputController, sampler: FlightSample): void {
+  update(delta: number, input: InputController): void {
     const dive = input.diveHeld;
 
-    // --- Banking: mouse X sets a target roll; roll drives the turn rate so
-    // turns feel weighty instead of twitchy.
+    // --- Banking: D sets a target roll; roll drives the turn rate so turns
+    // feel weighty instead of twitchy.
     const steerCurve = Math.sign(input.steerX) * Math.pow(Math.abs(input.steerX), 1.35);
-    // Negative roll drops the right wing (roll turns about the forward axis),
-    // so steering right banks right.
-    const targetRoll = -steerCurve * THREE.MathUtils.degToRad(58);
+    // D (steerX > 0) leans the body right on screen.
+    const targetRoll = steerCurve * ROLL_AT_FULL_STEER;
     this.roll = THREE.MathUtils.damp(this.roll, targetRoll, 3.2, delta);
-    // Forward is (sin h, 0, cos h), which puts the pilot's right at -cos h,
-    // sin h — so a right turn DECREASES heading. The bank and the turn have to
-    // share a sign or steering inverts against the visible lean.
-    const yawRate = this.roll * 1.05;
+    // ...and a right lean has to swing the nose right on screen, which is a
+    // DECREASING heading. See the sign note on YAW_RATE_PER_ROLL above.
+    const yawRate = this.roll * YAW_RATE_PER_ROLL;
     this.heading += yawRate * delta;
 
-    // --- Pitch: gentle trim from mouse Y, overridden by the dive tuck.
+    // --- Pitch: gentle trim from W/S, overridden by the dive tuck.
     const trimPitch = THREE.MathUtils.degToRad(-8) - input.steerY * THREE.MathUtils.degToRad(14);
     const targetPitch = dive ? THREE.MathUtils.degToRad(-56) : trimPitch;
     const pitchLambda = dive ? 2.6 : 2.0;
@@ -82,16 +91,8 @@ export class FlightModel {
     this.updateVelocity();
     this.position.addScaledVector(this.velocity, delta);
 
-    // --- Soft altitude floor above rooftops and the ocean.
-    const floor = Math.max(
-      sampleFloor(sampler, this.position.x, this.position.z, this.velocity),
-      WORLD.oceanLevel + 40,
-    );
-    if (this.position.y < floor) {
-      const push = Math.min(1, (floor - this.position.y) / 30);
-      this.position.y += push * 26 * delta;
-      if (this.pitch < 0) this.pitch += push * delta * 1.4;
-    }
+    // No altitude floor: the world is solid, and flying into it is the fail
+    // state. Contact is detected by the game, which owns the city and blimps.
     if (this.position.y > 1750) {
       this.position.y = 1750;
       if (this.pitch > 0) this.pitch = 0;
@@ -106,15 +107,6 @@ export class FlightModel {
     );
     this.velocity.copy(this.forward).multiplyScalar(this.speed);
   }
-}
-
-function sampleFloor(sampler: FlightSample, x: number, z: number, velocity: THREE.Vector3): number {
-  // Look slightly ahead so the pull-up starts before the rooftop, not on it.
-  const aheadX = x + velocity.x * 1.2;
-  const aheadZ = z + velocity.z * 1.2;
-  const here = sampler.groundHeightAt(x, z);
-  const ahead = sampler.groundHeightAt(aheadX, aheadZ);
-  return Math.max(here, ahead) + WORLD.minGlideAltitude;
 }
 
 function wrapAngle(angle: number): number {

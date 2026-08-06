@@ -9,9 +9,10 @@ export const WORLD = {
   jumpPosition: new THREE.Vector3(0, 1500, 2350),
   /** The signal tower on the far side of the island. */
   towerPosition: new THREE.Vector3(-140, 0, -1280),
+  /** The marked skyscraper the player flies to, catches, and climbs. */
+  targetTowerPosition: new THREE.Vector3(260, 0, -1020),
   /** Height of the gargoyle perch above the tower base. */
   towerPerchHeight: 342,
-  minGlideAltitude: 130,
 };
 
 export function towerPerchPoint(): THREE.Vector3 {

@@ -95,16 +95,16 @@ await page.waitForTimeout(1500);
 await shoot('04-glide');
 
 // Steer right for a banking shot.
-await page.mouse.move(1050, 300);
+await page.keyboard.down('KeyD');
 await page.waitForTimeout(1800);
 await shoot('05-banking');
-await page.mouse.move(640, 360);
+await page.keyboard.up('KeyD');
 
 // Dive.
-await page.mouse.down();
+await page.keyboard.down('ShiftLeft');
 await page.waitForTimeout(2000);
 await shoot('06-dive');
-await page.mouse.up();
+await page.keyboard.up('ShiftLeft');
 await page.waitForTimeout(1600);
 await shoot('07-swoop');
 

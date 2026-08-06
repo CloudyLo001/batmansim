@@ -52,17 +52,17 @@ const shoot = async (name) => {
 await page.waitForTimeout(2500);
 await shoot('a-level');
 
-await page.mouse.move(900, 270);
+await page.keyboard.down('KeyD');
 await page.waitForTimeout(2500);
 await shoot('b-bank-right');
 
-await page.mouse.move(480, 270);
+await page.keyboard.up('KeyD');
 await page.waitForTimeout(1500);
-await page.mouse.down();
+await page.keyboard.down('ShiftLeft');
 await page.waitForTimeout(2500);
 await shoot('c-dive');
 
-await page.mouse.up();
+await page.keyboard.up('ShiftLeft');
 await page.waitForTimeout(2000);
 await shoot('d-swoop');
 

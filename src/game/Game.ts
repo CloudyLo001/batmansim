@@ -13,10 +13,17 @@ import { Lightning } from '../systems/Lightning';
 import { PauseMenu } from '../systems/PauseMenu';
 import { PostFX } from '../systems/PostFX';
 import { Rain } from '../systems/Rain';
-import { MOON_DIR, Sky } from '../systems/Sky';
+import { Sky } from '../systems/Sky';
+import { ScreenFade } from '../systems/ScreenFade';
+import { TitleScreen } from '../systems/TitleScreen';
 import { createSeededRandom } from '../utils/random';
 import { loadAssets, type LoadedAssets } from './Assets';
-import { INTRO_DURATION, LANDING_DURATION, LANDING_TRIGGER_DISTANCE, Phase } from './Phases';
+import {
+  BLIMP_CONTACT_RADIUS,
+  CONTACT_CLEARANCE,
+  CRASH_FADE_DURATION,
+  Phase,
+} from './Phases';
 import { WORLD } from './World';
 
 const MAX_DPR = 1.75;
@@ -39,6 +46,9 @@ export class Game {
     () => this.restart(),
   );
 
+  private readonly titleScreen = new TitleScreen(() => this.beginGlide());
+  private readonly screenFade = new ScreenFade();
+
   private rng = createSeededRandom(7);
   private paused = false;
   private phase: Phase = Phase.Loading;
@@ -52,7 +62,6 @@ export class Game {
 
   // Populated once loading succeeds.
   private batman: Batman | null = null;
-  private batwing: THREE.Object3D | null = null;
   private city: City | null = null;
   private sky: Sky | null = null;
   private rain: Rain | null = null;
@@ -61,18 +70,12 @@ export class Game {
   private batSignal: BatSignal | null = null;
   private postFx: PostFX | null = null;
 
-  private readonly perchPoint = new THREE.Vector3();
-  /** Horizontal direction from the tower axis out to the perch ledge. */
-  private readonly perchOutward = new THREE.Vector3(0, 0, 1);
-  /** Horizontal distance from the tower axis to the perch. */
-  private perchRadial = 20;
-  private readonly introFrom = new THREE.Vector3();
-  private readonly landingFrom = new THREE.Vector3();
-  private landingFromHeading = 0;
+  private readonly titleAnchor = new THREE.Vector3();
   private readonly cameraVelocity = new THREE.Vector3();
   private readonly previousCameraPosition = new THREE.Vector3();
   private readonly scratch = new THREE.Vector3();
   private readonly scratchB = new THREE.Vector3();
+  private readonly tmpLook = new THREE.Vector3();
   private disposed = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
@@ -86,10 +89,10 @@ export class Game {
 
     this.input = new InputController(canvas);
     this.input.onRestart(() => {
-      if (this.phase === Phase.Perched || this.phase === Phase.Glide) this.restart();
+      if (this.phase === Phase.Glide) this.restart();
     });
     this.input.onSkip(() => {
-      if (this.phase === Phase.Intro) this.beginGlide();
+      if (this.phase === Phase.Title) this.beginGlide();
     });
 
     resizeRenderer(this.renderer, this.camera, MAX_DPR);
@@ -106,6 +109,7 @@ export class Game {
     this.loop.stop();
     this.input.dispose();
     this.pauseMenu.dispose();
+    this.titleScreen.dispose();
     this.postFx?.dispose();
     this.batman?.dispose();
     this.city?.dispose();
@@ -136,7 +140,7 @@ export class Game {
     this.hud.setLoadingProgress(1, 'AIRBORNE');
     this.hud.finishLoading();
     this.pauseMenu.setEnabled(true);
-    this.beginIntro();
+    this.beginTitle();
   }
 
   private buildWorld(assets: LoadedAssets): void {
@@ -156,23 +160,8 @@ export class Game {
     );
     this.scene.add(this.city.group);
 
-    this.perchPoint.copy(this.city.perchPoint);
-    // Cinematic cameras must sit outboard of the tower axis or they end up
-    // inside the crown stonework, which fully occludes the hero.
-    this.perchOutward
-      .set(this.perchPoint.x - WORLD.towerPosition.x, 0, this.perchPoint.z - WORLD.towerPosition.z);
-    this.perchRadial = Math.max(this.perchOutward.length(), 1);
-    this.perchOutward.normalize();
-
     this.batman = new Batman(assets.batmanModel, assets.batmanClips, assets.cape);
     this.scene.add(this.batman.group);
-
-    // fitLength recenters the model on its own transform, so flight placement
-    // goes on a parent group instead of overwriting that normalization.
-    fitLength(assets.batwing, 26);
-    this.batwing = new THREE.Group();
-    this.batwing.add(assets.batwing);
-    this.scene.add(this.batwing);
 
     this.rain = new Rain(this.rng);
     this.scene.add(this.rain.lines);
@@ -195,9 +184,12 @@ export class Game {
         camera: this.camera,
         batman: this.batman,
         city: this.city,
+        blimps: this.blimps,
         flight: this.flight,
         input: this.input,
-        perchPoint: this.perchPoint,
+        // Lets QA frame the hero with the real chase camera, so steering can be
+        // asserted in screen space instead of re-derived from the world axes.
+        rig: this.rig,
         THREE,
       };
     }
@@ -205,17 +197,22 @@ export class Game {
 
   // ----- Phase transitions -----
 
-  private beginIntro(): void {
+  /** Menu state: he simply hangs in the air, wings spread, behind the title. */
+  private beginTitle(): void {
     if (!this.batman) return;
-    this.phase = Phase.Intro;
+    this.phase = Phase.Title;
     this.phaseTime = 0;
     this.rig.cinematic = true;
     this.hud.setHudVisible(false);
     this.hud.hidePrompt();
     this.hud.setControlHintVisible(false);
-    this.introFrom.copy(WORLD.jumpPosition);
-    this.batman.setState('skydive');
+    this.titleAnchor.copy(WORLD.jumpPosition).add(this.scratch.set(0, -360, -520));
+    this.batman.setState('glide');
+    this.batman.proneOverride = null;
+    this.batman.group.position.copy(this.titleAnchor);
+    this.batman.group.rotation.set(0, Math.PI, 0);
     this.batman.resetWing();
+    this.titleScreen.show();
   }
 
   private beginGlide(): void {
@@ -223,12 +220,11 @@ export class Game {
     this.phase = Phase.Glide;
     this.phaseTime = 0;
     this.rig.cinematic = false;
-    this.flight.reset(
-      this.scratch.copy(WORLD.jumpPosition).add(this.scratchB.set(0, -320, -420)),
-      Math.PI,
-      52,
-    );
+    this.titleScreen.hide();
+    // Departs from exactly where he hovered, so there is no cut on start.
+    this.flight.reset(this.titleAnchor, Math.PI, 46);
     this.batman.setState('glide');
+    this.batman.proneOverride = null;
     this.batman.group.position.copy(this.flight.position);
     this.batman.group.rotation.set(-this.flight.pitch, this.flight.heading, 0);
     this.batman.resetWing();
@@ -239,32 +235,33 @@ export class Game {
     this.promptTimer = 2.4;
   }
 
-  private beginLanding(): void {
+  /**
+   * He hit something. The frame holds where it stopped and fades straight to
+   * black — no tumble and no fail card, so a retry is a couple of beats away.
+   */
+  private beginCrash(): void {
     if (!this.batman) return;
-    this.phase = Phase.Landing;
+    this.phase = Phase.Crash;
     this.phaseTime = 0;
-    this.rig.cinematic = true;
     this.hud.setHudVisible(false);
     this.hud.hidePrompt();
     this.hud.setControlHintVisible(false);
-    this.landingFrom.copy(this.flight.position);
-    this.landingFromHeading = this.flight.heading;
-    this.batman.setState('flare');
     this.lightning?.forceStrike();
-  }
-
-  private beginPerched(): void {
-    if (!this.batman) return;
-    this.phase = Phase.Perched;
-    this.phaseTime = 0;
-    this.batman.setState('perch');
-    this.rig.addImpulse(0.9);
-    this.hud.setHudVisible(true);
-    this.hud.showPrompt('PRESS R TO DROP AGAIN');
+    this.rig.addImpulse(1.4);
+    this.screenFade.setOpaque(true);
   }
 
   private restart(): void {
-    this.beginIntro();
+    this.screenFade.setOpaque(false);
+    this.beginTitle();
+  }
+
+  /** A point just off the target tower's climbable face, for staging QA runs. */
+  private towerFace(out: THREE.Vector3, wall: City['targetWall']): THREE.Vector3 {
+    return out
+      .copy(wall.origin)
+      .setY(wall.topY - 15)
+      .addScaledVector(wall.normal, 6);
   }
 
   /**
@@ -273,7 +270,7 @@ export class Game {
    */
   private handlePauseChange(paused: boolean): void {
     this.paused = paused;
-    this.hud.setHudVisible(!paused && this.phase !== Phase.Intro && this.phase !== Phase.Landing);
+    this.hud.setHudVisible(!paused && this.phase === Phase.Glide);
     if (paused) this.input.releaseAll();
   }
 
@@ -298,17 +295,14 @@ export class Game {
     switch (this.phase) {
       case Phase.Loading:
         break;
-      case Phase.Intro:
-        this.updateIntro(animDelta);
+      case Phase.Title:
+        this.updateTitle(animDelta);
         break;
       case Phase.Glide:
         this.updateGlide(animDelta);
         break;
-      case Phase.Landing:
-        this.updateLanding(animDelta);
-        break;
-      case Phase.Perched:
-        this.updatePerched(animDelta);
+      case Phase.Crash:
+        this.updateCrash(animDelta);
         break;
     }
 
@@ -316,104 +310,41 @@ export class Game {
     this.publishDiagnostics();
   }
 
-  private updateIntro(delta: number): void {
+  /**
+   * Menu state. He hovers with a slow bob while the camera drifts a long slow
+   * arc around him, so the title sits over a living shot rather than a freeze.
+   */
+  private updateTitle(delta: number): void {
     const batman = this.batman;
-    const batwing = this.batwing;
-    if (!batman || !batwing) return;
+    if (!batman) return;
     this.phaseTime += delta;
     const t = this.phaseTime;
 
-    // Batwing crosses the moon high above the drop point.
-    const wingProgress = Math.min(1, t / 6);
-    batwing.position.set(
-      THREE.MathUtils.lerp(260, -340, wingProgress),
-      this.introFrom.y + 65,
-      this.introFrom.z - 120,
-    );
-    batwing.rotation.set(0, -Math.PI / 2, 0.04 * Math.sin(t * 2));
-    batwing.visible = t < 7.5;
-
     const previous = this.scratchB.copy(batman.group.position);
+    batman.group.position.copy(this.titleAnchor);
+    batman.group.position.y += Math.sin(t * 0.5) * 1.6;
+    batman.group.rotation.set(
+      THREE.MathUtils.degToRad(6) + Math.sin(t * 0.37) * 0.04,
+      Math.PI + Math.sin(t * 0.23) * 0.09,
+      Math.sin(t * 0.31) * 0.05,
+    );
 
-    if (t < 2.8) {
-      // Riding the wing: hero attached beneath the aircraft.
-      batman.group.position.copy(batwing.position).add(this.scratch.set(0, -3.2, 0));
-      batman.group.rotation.set(0, Math.PI, 0);
-      batman.setState('perch');
-    } else if (t < 6.2) {
-      // Freefall: head-first dive, accelerating.
-      const fall = t - 2.8;
-      batman.group.position.set(
-        THREE.MathUtils.lerp(720, -900, Math.min(1, 2.8 / 6)) * 0 + this.introFrom.x,
-        this.introFrom.y + 65 - 3.2 - fall * fall * 14,
-        this.introFrom.z - 120 - fall * 26,
-      );
-      batman.group.rotation.order = 'YXZ';
-      batman.group.rotation.set(THREE.MathUtils.degToRad(70), Math.PI, Math.sin(t * 3) * 0.06);
-      batman.setState('skydive');
-    } else {
-      // Cape snap: pull out of the dive into the glide line.
-      const pull = THREE.MathUtils.clamp((t - 6.2) / 2.2, 0, 1);
-      const eased = 1 - Math.pow(1 - pull, 3);
-      const fallEnd = 3.4;
-      const yAtPull = this.introFrom.y + 65 - 3.2 - fallEnd * fallEnd * 14;
-      const zAtPull = this.introFrom.z - 120 - fallEnd * 26;
-      batman.group.position.set(
-        this.introFrom.x,
-        yAtPull - (1 - eased) * 60 * (1 - pull) - eased * 40 * pull,
-        zAtPull - eased * 150 * pull - (t - 6.2) * 40,
-      );
-      batman.group.rotation.set(
-        THREE.MathUtils.lerp(THREE.MathUtils.degToRad(70), THREE.MathUtils.degToRad(10), eased),
-        Math.PI,
-        0,
-      );
-      // The wing cracks open out of the freefall tuck.
-      if (pull > 0.05) batman.setState('glide');
-      if (pull > 0.02 && pull < 0.2) this.rig.addImpulse(0.7);
-    }
-
-    // Airflow from the scripted motion drives the membrane.
     const velocity = delta > 0
       ? this.scratch.copy(batman.group.position).sub(previous).divideScalar(delta)
       : this.scratch.set(0, 0, 0);
-    const flutter = t > 6.2 && t < 7.4 ? 1.8 : t > 2.8 ? 1.0 : 0.3;
-    batman.update(delta, velocity, flutter);
+    batman.update(delta, velocity, 0.55);
 
-    this.updateIntroCamera(t, batman, batwing);
-
-    if (t >= INTRO_DURATION) this.beginGlide();
-  }
-
-  private updateIntroCamera(t: number, batman: Batman, batwing: THREE.Object3D): void {
-    if (t < 2.8) {
-      // Close tracking shot: camera sits opposite the moon bearing so the
-      // wing crosses silhouetted against it.
-      this.scratch.copy(batwing.position).addScaledVector(MOON_DIR, -95);
-      this.scratch.y = batwing.position.y + 8;
-      this.rig.setCinematicFrame(this.scratch, batwing.position, 44);
-    } else if (t < 6.2) {
-      // Whip down with the freefall, staying clear of the trailing membrane.
-      const fall = THREE.MathUtils.clamp((t - 2.8) / 3.4, 0, 1);
-      this.scratch.set(
-        batman.group.position.x + THREE.MathUtils.lerp(16, 8, fall),
-        batman.group.position.y + THREE.MathUtils.lerp(9, 4, fall),
-        batman.group.position.z + THREE.MathUtils.lerp(20, -2, fall),
-      );
-      this.rig.setCinematicFrame(this.scratch, batman.group.position, THREE.MathUtils.lerp(50, 62, fall));
-    } else {
-      // Settle behind for the handoff.
-      const settle = THREE.MathUtils.clamp((t - 6.2) / 3.0, 0, 1);
-      const eased = settle * settle * (3 - 2 * settle);
-      this.scratch.set(
-        batman.group.position.x + THREE.MathUtils.lerp(8, 0, eased),
-        batman.group.position.y + THREE.MathUtils.lerp(4, 4.2, eased),
-        batman.group.position.z + THREE.MathUtils.lerp(-2, 10.6, eased),
-      );
-      this.scratchB.copy(batman.group.position);
-      this.scratchB.z -= eased * 7;
-      this.rig.setCinematicFrame(this.scratch, this.scratchB, THREE.MathUtils.lerp(62, 55, eased));
-    }
+    // Slow orbit. The look target sits below him so he rides high in frame,
+    // clear of the title above and the Start control beneath.
+    const angle = Math.PI + t * 0.055;
+    const radius = 13;
+    this.scratch.set(
+      batman.group.position.x + Math.sin(angle) * radius,
+      batman.group.position.y + 1.2 + Math.sin(t * 0.29) * 0.5,
+      batman.group.position.z + Math.cos(angle) * radius,
+    );
+    this.scratchB.copy(batman.group.position).add(this.tmpLook.set(0, -0.7, 0));
+    this.rig.setCinematicFrame(this.scratch, this.scratchB, 40);
   }
 
   private updateGlide(delta: number): void {
@@ -423,7 +354,15 @@ export class Game {
     this.phaseTime += delta;
 
     this.input.update(delta);
-    this.flight.update(delta, this.input, city);
+    this.flight.update(delta, this.input);
+
+    // Contact ends the run. Checked before the pose is applied so the held
+    // frame shows him at the surface rather than a step past it.
+    if (this.hasContact(city)) {
+      batman.group.position.copy(this.flight.position);
+      this.beginCrash();
+      return;
+    }
 
     batman.group.position.copy(this.flight.position);
     batman.group.rotation.order = 'YXZ';
@@ -454,105 +393,40 @@ export class Game {
       if (this.promptTimer <= 0) this.hud.hidePrompt();
     }
 
-    const objectiveDistance = this.flight.position.distanceTo(this.perchPoint);
-    this.hud.update(
+    this.hud.update(this.flight.heading);
+  }
+
+  /**
+   * Has he touched the world? Buildings, streets and the island base all live
+   * in the city's height field, and the ocean sits at the same level the field
+   * reports off the island, so one comparison covers all three.
+   */
+  private hasContact(city: City): boolean {
+    const { x, y, z } = this.flight.position;
+    const surface = Math.max(city.groundHeightAt(x, z), WORLD.oceanLevel);
+    if (y <= surface + CONTACT_CLEARANCE) return true;
+    const blimp = this.blimps?.nearestDistance(this.flight.position) ?? Infinity;
+    return blimp < BLIMP_CONTACT_RADIUS;
+  }
+
+  /**
+   * The crash beat. Everything is already frozen — the hero is not simulated
+   * and the camera only rides out its impact shake — so this just waits for the
+   * fade to finish and resets.
+   */
+  private updateCrash(delta: number): void {
+    const batman = this.batman;
+    if (!batman) return;
+    this.phaseTime += delta;
+    this.rig.updateChase(
+      delta,
+      batman.group.position,
       this.flight.heading,
-      this.flight.position.y,
-      this.perchPoint,
-      objectiveDistance,
-      this.camera,
-      this.blimps ? this.blimps.nearestDistance(this.flight.position) : Infinity,
+      this.flight.pitch,
+      this.flight.roll,
+      0,
     );
-
-    // Trigger on horizontal proximity: the altitude floor keeps the player
-    // above the tower, so a spherical trigger would be unreachable.
-    const horizontal = Math.hypot(
-      this.flight.position.x - this.perchPoint.x,
-      this.flight.position.z - this.perchPoint.z,
-    );
-    const heightAbovePerch = this.flight.position.y - this.perchPoint.y;
-    if (horizontal < LANDING_TRIGGER_DISTANCE && heightAbovePerch > -60 && heightAbovePerch < 280) {
-      this.beginLanding();
-    }
-  }
-
-  private updateLanding(delta: number): void {
-    const batman = this.batman;
-    if (!batman) return;
-    this.phaseTime += delta;
-    const t = this.phaseTime;
-    const approach = LANDING_DURATION * 0.6;
-    const progress = THREE.MathUtils.clamp(t / approach, 0, 1);
-    const eased = 1 - Math.pow(1 - progress, 3);
-
-    const previous = this.scratchB.copy(batman.group.position);
-
-    // Three beats: swoop in flared, touch down, then furl into the perch.
-    batman.group.position.lerpVectors(this.landingFrom, this.perchPoint, eased);
-    // Rise over the approach so he drops onto the ledge rather than sliding in.
-    batman.group.position.y += Math.sin(eased * Math.PI) * 30 * (1 - eased * 0.55);
-    batman.group.rotation.order = 'YXZ';
-    batman.group.rotation.y = this.landingFromHeading;
-    // Nose lifts hard through the flare, then levels as he sets down.
-    batman.group.rotation.x = Math.sin(eased * Math.PI) * -0.5;
-    batman.group.rotation.z = THREE.MathUtils.lerp(batman.group.rotation.z, 0, Math.min(1, eased * 2));
-
-    if (progress >= 1) {
-      batman.setState('perch');
-    } else if (progress > 0.35) {
-      batman.setState('flare');
-    }
-
-    const velocity = delta > 0
-      ? this.scratch.copy(batman.group.position).sub(previous).divideScalar(delta)
-      : this.scratch.set(0, 0, 0);
-    // The membrane thrashes hardest at the moment of the flare.
-    batman.update(delta, velocity, 0.4 + Math.sin(eased * Math.PI) * 1.7);
-
-    // Orbit the tower axis rather than the hero: at a radius beyond the crown
-    // the camera never enters stonework, and the hero still tracks in frame.
-    const settle = Math.min(1, t / LANDING_DURATION);
-    const baseAngle = Math.atan2(this.perchOutward.x, this.perchOutward.z);
-    const orbitAngle = baseAngle - 0.75 + settle * 0.75;
-    const radius = this.perchRadial + THREE.MathUtils.lerp(48, 17, settle);
-    this.scratch.set(
-      WORLD.towerPosition.x + Math.sin(orbitAngle) * radius,
-      Math.max(
-        batman.group.position.y + THREE.MathUtils.lerp(16, 3.4, settle),
-        this.perchPoint.y + 3.4,
-      ),
-      WORLD.towerPosition.z + Math.cos(orbitAngle) * radius,
-    );
-    this.scratchB.copy(batman.group.position);
-    this.scratchB.y += 1.4;
-    this.rig.setCinematicFrame(this.scratch, this.scratchB, 46);
-
-    if (t >= LANDING_DURATION) this.beginPerched();
-  }
-
-  private updatePerched(delta: number): void {
-    const batman = this.batman;
-    if (!batman) return;
-    this.phaseTime += delta;
-    // Residual gusts keep the furled cloak alive on the ledge.
-    batman.update(delta, this.scratch.set(0, 0, 0), 0.3);
-
-    // Hold with a slow drift: hero on the gargoyle with the tower crown,
-    // signal beam, and storm behind him.
-    const baseAngle = Math.atan2(this.perchOutward.x, this.perchOutward.z);
-    const angle = baseAngle + Math.sin(this.phaseTime * 0.12) * 0.16;
-    const radius = this.perchRadial + 15;
-    this.scratch.set(
-      WORLD.towerPosition.x + Math.sin(angle) * radius,
-      this.perchPoint.y + 3.2,
-      WORLD.towerPosition.z + Math.cos(angle) * radius,
-    );
-    this.scratchB.set(this.perchPoint.x, this.perchPoint.y + 1.2, this.perchPoint.z);
-    this.rig.setCinematicFrame(this.scratch, this.scratchB, 44);
-
-    // Only the prompt + compass strip stay on; objective marker hides itself
-    // because the perch is behind the camera framing.
-    this.hud.update(this.landingFromHeading, this.perchPoint.y, this.perchPoint, 0, this.camera, Infinity);
+    if (this.phaseTime >= CRASH_FADE_DURATION) this.restart();
   }
 
   private updateShared(delta: number, elapsed: number): void {
@@ -597,28 +471,26 @@ export class Game {
         this.rng = createSeededRandom(value);
       },
       setState: (name: string) => {
+        // Jumping straight into a phase must clear the menu overlay too.
+        if (name !== 'title') this.titleScreen.hide();
         if (name === 'active-play') this.beginGlide();
-        else if (name === 'near-tower') {
-          // QA: drop into the glide 300m out from the perch on approach.
-          this.beginGlide();
-          this.flight.reset(
-            this.scratch.copy(this.perchPoint).add(this.scratchB.set(0, 55, 300)),
-            Math.PI,
-            56,
-          );
-          this.rig.snapBehind(this.flight.position, this.flight.heading, this.flight.pitch);
-        }
-        else if (name === 'complete') {
-          this.landingFromHeading = Math.PI;
-          this.landingFrom.copy(this.perchPoint).add(new THREE.Vector3(0, 30, 90));
-          if (this.batman) {
-            this.batman.group.position.copy(this.perchPoint);
-            this.batman.group.rotation.set(0, Math.PI, 0);
-            this.batman.setState('perch');
-            this.batman.resetWing();
+        else if (name === 'near-tower' || name === 'crash') {
+          // Nothing on the HUD points at the tower any more, but it is still
+          // the most distinctive landmark to stage QA shots against.
+          const wall = this.city?.targetWall;
+          if (!wall) return;
+          this.towerFace(this.scratch, wall);
+          if (name === 'near-tower') {
+            // QA: drop into the glide 300m out from the tower on approach.
+            this.beginGlide();
+            this.flight.reset(this.scratch.add(this.scratchB.set(0, 40, 300)), Math.PI, 56);
+            this.rig.snapBehind(this.flight.position, this.flight.heading, this.flight.pitch);
+          } else {
+            // QA: fly him into the tower's face from close range.
+            this.flight.reset(this.scratch.add(this.scratchB.set(0, 0, 40)), Math.PI, 50);
+            if (this.batman) this.batman.group.position.copy(this.flight.position);
+            this.beginCrash();
           }
-          this.hud.setControlHintVisible(false);
-          this.beginPerched();
         } else console.warn(`Unknown test state: ${name}`);
       },
       setPausedForScreenshot: (paused: boolean) => {
@@ -636,9 +508,10 @@ export class Game {
     window.__THREE_GAME_DIAGNOSTICS__ = {
       frame: this.frame,
       elapsed: this.elapsed,
-      score: this.phase === Phase.Perched ? 1 : 0,
+      // There is no win state: the run ends by crashing, so it never completes.
+      score: 0,
       targetScore: 1,
-      complete: this.phase === Phase.Perched,
+      complete: false,
       player: {
         position: {
           x: this.flight.position.x,
@@ -663,14 +536,4 @@ export class Game {
       phase: this.phase,
     };
   }
-}
-
-function fitLength(model: THREE.Object3D, targetLength: number): void {
-  const bounds = new THREE.Box3().setFromObject(model);
-  const size = bounds.getSize(new THREE.Vector3());
-  const length = Math.max(size.x, size.z) || 1;
-  model.scale.multiplyScalar(targetLength / length);
-  bounds.setFromObject(model);
-  const center = bounds.getCenter(new THREE.Vector3());
-  model.position.sub(center);
 }

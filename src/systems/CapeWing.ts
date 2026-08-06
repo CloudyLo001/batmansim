@@ -8,8 +8,13 @@ const TARGET_SPAN = 4.9;
  * cape hangs from this point.
  */
 const COLLAR_LOCAL = new THREE.Vector3(0.003, 0.314, -0.175);
-/** Where the collar pins onto the body: the back of the neck. */
-const NECK_ANCHOR = new THREE.Vector3(0, 1.7, -0.12);
+/**
+ * Where the collar pins onto the body. Sits a little below the neck joint and
+ * slightly off the back: local +Y is forward in prone flight, so dropping it
+ * lets the cowl and shoulders clear the cape's leading edge, and the small -Z
+ * lifts the garment off his back rather than intersecting it.
+ */
+const NECK_ANCHOR = new THREE.Vector3(0, 1.3, -0.16);
 /**
  * Drape-depth compression. The garment was authored hanging, and its sag axis
  * becomes world-down in prone flight — at full depth the wings droop ~2 m
@@ -64,10 +69,13 @@ export class CapeWing {
     const box = this.geometry.boundingBox as THREE.Box3;
     const size = box.getSize(new THREE.Vector3());
     const scale = size.x > 0.001 ? TARGET_SPAN / size.x : 1;
-    // Re-origin on the collar ring so the garment hangs from its neck hole,
-    // then scale to span. The source pose already matches flight: leading edge
-    // across the top, membrane flowing down-back, hem sagging below.
+    // Re-origin on the collar ring so the garment hangs from its neck hole.
     this.geometry.translate(-COLLAR_LOCAL.x, -COLLAR_LOCAL.y, -COLLAR_LOCAL.z);
+    // The garment drapes toward +Z from its collar, but body-local +Z is
+    // forward — and forward becomes world-down once the hero goes prone, which
+    // slings the cape underneath him. Turning it about Y puts the drape on his
+    // back, so he flies beneath the cloak with only his head clear of it.
+    this.geometry.rotateY(Math.PI);
     this.geometry.scale(scale, scale, scale * DEPTH_SCALE);
 
     this.geometry.computeBoundingBox();
@@ -90,8 +98,9 @@ export class CapeWing {
     const material = sourceMesh.material as THREE.Material;
     if (material instanceof THREE.MeshStandardMaterial) {
       material.side = THREE.DoubleSide;
-      // Dark: against the moon the cape must read as a silhouette.
-      material.color.setScalar(0.92);
+      // Dark enough to silhouette against the moon, light enough that the
+      // ribs and scallops still read against the city.
+      material.color.setScalar(1.08);
       material.metalness = 0.04;
       // Matte: sharp speculars across the normal-mapped ribs read as crumpled
       // foil once bloom amplifies them.

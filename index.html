@@ -24,19 +24,38 @@
           <div id="compass-window"><div id="compass-strip"></div></div>
           <div id="compass-caret"></div>
         </div>
-        <div id="altitude">
-          <span id="altitude-value">1500</span><span class="hud-unit">M</span>
-        </div>
-        <div id="objective-marker">
-          <div class="obj-diamond"></div>
-          <div id="objective-distance">0m</div>
-        </div>
-        <div id="surveillance-tag">
-          <div class="tag-title">LOCAL SURVEILLANCE</div>
-          <div class="tag-sub">RANGE <span id="surveillance-range">0</span>M</div>
-        </div>
         <div id="center-prompt"></div>
-        <div id="control-hint">MOUSE / WASD steer &nbsp;·&nbsp; LMB or SHIFT dive &nbsp;·&nbsp; ESC menu</div>
+        <div id="control-hint">WASD steer &nbsp;·&nbsp; SHIFT dive &nbsp;·&nbsp; ESC menu</div>
+      </section>
+      <div id="screen-fade"></div>
+      <section id="title-screen" hidden>
+        <h1 id="title-word"><span>K</span><span>N</span><span>I</span><span>G</span><span>H</span><span>T</span><span>F</span><span>A</span><span>L</span><span>L</span></h1>
+        <div id="title-rule"></div>
+        <button id="start-button" type="button" aria-label="Start">
+          <svg viewBox="0 0 420 132" aria-hidden="true">
+            <defs>
+              <linearGradient id="start-sweep" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="currentColor" stop-opacity="0" />
+                <stop offset="0.5" stop-color="currentColor" stop-opacity="0.5" />
+                <stop offset="1" stop-color="currentColor" stop-opacity="0" />
+              </linearGradient>
+              <path id="start-arc" d="M 46 52 Q 210 108 374 52" />
+            </defs>
+            <!-- Wing-like arc: a shallow curve with swept tips, echoing the cape. -->
+            <path
+              d="M 22 34 Q 60 40 88 56 Q 150 96 210 100 Q 270 96 332 56 Q 360 40 398 34
+                 L 392 58 Q 350 62 314 82 Q 258 118 210 120 Q 162 118 106 82 Q 70 62 28 58 Z"
+              fill="url(#start-sweep)"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linejoin="round"
+            />
+            <text dy="-14">
+              <textPath href="#start-arc" startOffset="50%" text-anchor="middle">START</textPath>
+            </text>
+          </svg>
+        </button>
+        <p id="title-hint">CLICK &nbsp;or&nbsp; PRESS ENTER</p>
       </section>
       <button id="settings-button" type="button" aria-label="Open menu" aria-haspopup="dialog">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -52,8 +71,9 @@
           <button class="pause-action" id="resume-button" type="button">RESUME</button>
           <button class="pause-action" id="restart-button" type="button">RESTART FROM THE JUMP</button>
           <dl id="pause-controls">
-            <div><dt>Mouse / WASD</dt><dd>Steer</dd></div>
-            <div><dt>LMB / Shift</dt><dd>Dive</dd></div>
+            <div><dt>A / D</dt><dd>Bank left / right</dd></div>
+            <div><dt>W / S</dt><dd>Pitch</dd></div>
+            <div><dt>Shift</dt><dd>Dive</dd></div>
             <div><dt>R</dt><dd>Restart</dd></div>
             <div><dt>Esc</dt><dd>Pause / resume</dd></div>
           </dl>

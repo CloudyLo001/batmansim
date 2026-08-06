@@ -1,29 +1,24 @@
 /**
- * Flight input from mouse and keyboard combined. steerX/steerY are the blended
- * steering axes in [-1, 1]; diveHeld is the left mouse button or Shift.
+ * Flight input, keyboard only. steerX/steerY are the steering axes in [-1, 1];
+ * diveHeld is Shift.
  *
- * Keyboard is additive on top of the pointer rather than exclusive, so holding
- * A while the mouse rests off-centre steers harder instead of fighting it.
+ * The mouse steers nothing: pointer position and mouse buttons have no effect
+ * on flight at all. Clicks still drive the title screen, end card and pause
+ * menu, but those are DOM buttons and never reach this controller.
  */
 export class InputController {
   steerX = 0;
   steerY = 0;
   diveHeld = false;
 
-  private pointerX = 0;
-  private pointerY = 0;
   private keyX = 0;
   private keyY = 0;
-  private mouseDive = false;
   private keyDive = false;
   private readonly keys = new Set<string>();
   private restartHandlers: Array<() => void> = [];
   private skipHandlers: Array<() => void> = [];
 
   constructor(private readonly canvas: HTMLCanvasElement) {
-    window.addEventListener('pointermove', this.onPointerMove);
-    window.addEventListener('pointerdown', this.onPointerDown);
-    window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
@@ -39,9 +34,9 @@ export class InputController {
     this.keyX += (wantX - this.keyX) * rate;
     this.keyY += (wantY - this.keyY) * rate;
 
-    this.steerX = clamp(this.pointerX + this.keyX, -1, 1);
-    this.steerY = clamp(this.pointerY + this.keyY, -1, 1);
-    this.diveHeld = this.mouseDive || this.keyDive;
+    this.steerX = clamp(this.keyX, -1, 1);
+    this.steerY = clamp(this.keyY, -1, 1);
+    this.diveHeld = this.keyDive;
   }
 
   onRestart(handler: () => void): void {
@@ -53,9 +48,6 @@ export class InputController {
   }
 
   dispose(): void {
-    window.removeEventListener('pointermove', this.onPointerMove);
-    window.removeEventListener('pointerdown', this.onPointerDown);
-    window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
@@ -63,21 +55,6 @@ export class InputController {
     this.restartHandlers = [];
     this.skipHandlers = [];
   }
-
-  private readonly onPointerMove = (event: PointerEvent) => {
-    const width = Math.max(1, window.innerWidth);
-    const height = Math.max(1, window.innerHeight);
-    this.pointerX = clamp((event.clientX / width) * 2 - 1, -1, 1);
-    this.pointerY = clamp((event.clientY / height) * 2 - 1, -1, 1);
-  };
-
-  private readonly onPointerDown = (event: PointerEvent) => {
-    if (event.button === 0) this.mouseDive = true;
-  };
-
-  private readonly onPointerUp = (event: PointerEvent) => {
-    if (event.button === 0) this.mouseDive = false;
-  };
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (isEditableTarget(event.target)) return;
@@ -102,7 +79,6 @@ export class InputController {
 
   private readonly onBlur = () => {
     this.keys.clear();
-    this.mouseDive = false;
     this.keyDive = false;
     this.diveHeld = false;
     this.keyX = 0;

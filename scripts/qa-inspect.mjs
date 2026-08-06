@@ -58,7 +58,6 @@ const report = await page.evaluate(() => {
 
   return {
     phase: window.__THREE_GAME_DIAGNOSTICS__?.phase,
-    perchPoint: d.perchPoint.toArray().map((v) => +v.toFixed(1)),
     heroPos: d.batman.group.position.toArray().map((v) => +v.toFixed(1)),
     heroRot: [d.batman.group.rotation.x, d.batman.group.rotation.y, d.batman.group.rotation.z]
       .map((v) => +v.toFixed(2)),
@@ -69,7 +68,6 @@ const report = await page.evaluate(() => {
     spireTopY: +d.city.spireTopY.toFixed(1),
     cameraPos: d.camera.position.toArray().map((v) => +v.toFixed(1)),
     instancedFootprints: instancedFootprints.slice(0, 8),
-    groundAtPerch: +d.city.groundHeightAt(d.perchPoint.x, d.perchPoint.z).toFixed(1),
   };
 });
 

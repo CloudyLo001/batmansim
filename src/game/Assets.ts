@@ -17,7 +17,6 @@ export const ASSET_URLS = {
   },
   // The optimized re-encode: the original GLB stalls GLTFLoader's parse.
   cape: '/assets/mint/cloak/optimized_glb.glb',
-  batwing: '/assets/mint/batwing/original_glb.glb',
   blimp: '/assets/mint/blimp/original_glb.glb',
   signalTower: '/assets/mint/signal-tower/original_glb.glb',
   city: {
@@ -38,7 +37,6 @@ export interface LoadedAssets {
   batmanClips: Partial<Record<BatmanClipRole, THREE.AnimationClip>>;
   /** Generated bat-wing membrane mesh used as the hero's cape. */
   cape: THREE.Object3D;
-  batwing: THREE.Object3D;
   blimp: THREE.Object3D;
   signalTower: THREE.Object3D;
   city: {
@@ -93,11 +91,10 @@ export async function loadAssets(
     }
   };
 
-  const [batmanGltf, capeGltf, batwingGltf, blimpGltf, towerGltf, spire, slab, twin, neon, industrial, bridge, ferris, skybox, ...clips] =
+  const [batmanGltf, capeGltf, blimpGltf, towerGltf, spire, slab, twin, neon, industrial, bridge, ferris, skybox, ...clips] =
     await Promise.all([
       loadModel(ASSET_URLS.batmanModel),
       loadModel(ASSET_URLS.cape),
-      loadModel(ASSET_URLS.batwing),
       loadModel(ASSET_URLS.blimp),
       loadModel(ASSET_URLS.signalTower),
       loadModel(ASSET_URLS.city.spire),
@@ -120,7 +117,6 @@ export async function loadAssets(
     batmanModel: batmanGltf.scene,
     batmanClips,
     cape: capeGltf.scene,
-    batwing: batwingGltf.scene,
     blimp: blimpGltf.scene,
     signalTower: towerGltf.scene,
     city: {

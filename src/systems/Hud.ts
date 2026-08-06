@@ -13,26 +13,18 @@ const CARDINALS: Array<[number, string]> = [
 ];
 
 /**
- * Diegetic Arkham-style DOM HUD: compass strip, altitude, screen-projected
- * objective marker with distance, blimp surveillance tag, center prompts,
- * and the bat-emblem loading screen.
+ * Diegetic Arkham-style DOM HUD: compass strip, center prompts, and the
+ * bat-emblem loading screen.
  */
 export class Hud {
   private readonly root = this.getElement('#hud');
   private readonly compassStrip = this.getElement('#compass-strip');
   private readonly compassWindow = this.getElement('#compass-window');
-  private readonly altitudeValue = this.getElement('#altitude-value');
-  private readonly objectiveMarker = this.getElement('#objective-marker');
-  private readonly objectiveDistance = this.getElement('#objective-distance');
-  private readonly surveillanceTag = this.getElement('#surveillance-tag');
-  private readonly surveillanceRange = this.getElement('#surveillance-range');
   private readonly centerPrompt = this.getElement('#center-prompt');
   private readonly controlHint = this.getElement('#control-hint');
   private readonly loading = this.getElement('#loading');
   private readonly loadingFill = this.getElement('#loading-fill');
   private readonly loadingStatus = this.getElement('#loading-status');
-
-  private readonly projected = new THREE.Vector3();
 
   constructor() {
     this.buildCompass();
@@ -76,14 +68,7 @@ export class Hud {
 
   // ----- Per-frame update -----
 
-  update(
-    heading: number,
-    altitude: number,
-    objectiveWorld: THREE.Vector3,
-    objectiveDistanceMeters: number,
-    camera: THREE.PerspectiveCamera,
-    blimpDistance: number,
-  ): void {
+  update(heading: number): void {
     // Compass: heading PI (facing -Z) reads as north.
     const compassDeg = THREE.MathUtils.euclideanModulo(
       -THREE.MathUtils.radToDeg(heading) + 180,
@@ -92,28 +77,6 @@ export class Hud {
     const windowWidth = this.compassWindow.clientWidth;
     const offset = -(compassDeg + 360) * PX_PER_DEGREE + windowWidth / 2;
     this.compassStrip.style.transform = `translateX(${offset}px)`;
-
-    this.altitudeValue.textContent = String(Math.max(0, Math.round(altitude)));
-
-    // Objective marker projected to screen space; hidden once arrived.
-    this.projected.copy(objectiveWorld).project(camera);
-    const behind = this.projected.z > 1 || objectiveDistanceMeters < 2;
-    if (behind) {
-      this.objectiveMarker.style.opacity = '0';
-    } else {
-      const x = THREE.MathUtils.clamp((this.projected.x * 0.5 + 0.5) * 100, 4, 96);
-      const y = THREE.MathUtils.clamp((-this.projected.y * 0.5 + 0.5) * 100, 6, 90);
-      this.objectiveMarker.style.opacity = '1';
-      this.objectiveMarker.style.left = `${x}%`;
-      this.objectiveMarker.style.top = `${y}%`;
-      this.objectiveDistance.textContent = `${Math.max(0, Math.round(objectiveDistanceMeters))}m`;
-    }
-
-    const blimpNear = blimpDistance < 600;
-    this.surveillanceTag.classList.toggle('active', blimpNear);
-    if (blimpNear) {
-      this.surveillanceRange.textContent = String(Math.round(blimpDistance));
-    }
   }
 
   private buildCompass(): void {

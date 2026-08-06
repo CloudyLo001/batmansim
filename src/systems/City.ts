@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { WORLD } from '../game/World';
-import type { FlightSample } from './FlightModel';
 
 export interface CityModels {
   spire: THREE.Object3D;
@@ -45,7 +44,7 @@ export const HORIZON_COLOR = 0x394a5a;
  * InstancedMesh per mesh part, and exposes a max-height field that the
  * flight model uses as its soft floor.
  */
-export class City implements FlightSample {
+export class City {
   readonly group = new THREE.Group();
   /**
    * Landing spot on the signal tower, raycast from the real crown geometry so
@@ -54,6 +53,18 @@ export class City implements FlightSample {
   readonly perchPoint = new THREE.Vector3();
   /** World Y of the spire tip where the bat-signal projector sits. */
   spireTopY = WORLD.towerPerchHeight;
+
+  /**
+   * The marked skyscraper the objective points at, and the vertical face the
+   * hero catches and climbs. Populated during construction.
+   */
+  readonly targetWall = {
+    origin: new THREE.Vector3(),
+    normal: new THREE.Vector3(0, 0, 1),
+    right: new THREE.Vector3(1, 0, 0),
+    topY: 0,
+    halfWidth: 12,
+  };
 
   private readonly heightGrid: Float32Array;
   private readonly gridSize: number;
@@ -91,6 +102,12 @@ export class City implements FlightSample {
         // Clear space around the signal tower so it reads as the landmark.
         const toTower = Math.hypot(x - WORLD.towerPosition.x, z - WORLD.towerPosition.z);
         if (toTower < 300) continue;
+        // Keep the approach to the climbable face clear of other geometry.
+        const toTarget = Math.hypot(
+          x - WORLD.targetTowerPosition.x,
+          z - WORLD.targetTowerPosition.z,
+        );
+        if (toTarget < 320) continue;
         if (rng() < 0.34) continue;
 
         const jitterX = x + (rng() - 0.5) * spacing * 0.55;
@@ -145,6 +162,38 @@ export class City implements FlightSample {
     // Deliberately not stamped into the height field: the tower is the
     // destination, so the glide floor must let the player descend onto it.
 
+    // --- The marked target skyscraper: the objective and the climbable face.
+    // Cloned so re-fitting it does not disturb the instanced copies, and, like
+    // the signal tower, deliberately left out of the height field so the glide
+    // floor lets the player descend onto its face instead of over it.
+    const targetHeight = 430;
+    const targetFootprint = 58;
+    const targetModel = models.slab.clone(true);
+    fitModel(targetModel, targetHeight);
+    // Fitting by height alone leaves the footprint hundreds of metres across,
+    // which reads as a landmass rather than a tower. Squeeze the plan to a real
+    // skyscraper footprint; the facade is boxy enough to take it.
+    const fitted = new THREE.Box3().setFromObject(targetModel);
+    const fittedWidth = Math.max(fitted.max.x - fitted.min.x, 0.001);
+    const squeeze = targetFootprint / fittedWidth;
+    targetModel.scale.x *= squeeze;
+    targetModel.scale.z *= squeeze;
+    targetModel.position.x *= squeeze;
+    targetModel.position.z *= squeeze;
+    const targetRoot = new THREE.Group();
+    targetRoot.position.set(WORLD.targetTowerPosition.x, 0, WORLD.targetTowerPosition.z);
+    targetRoot.add(targetModel);
+    this.group.add(targetRoot);
+    targetRoot.updateMatrixWorld(true);
+
+    const targetBox = new THREE.Box3().setFromObject(targetRoot);
+    // The face that greets the approach: the player flies inbound along -Z.
+    this.targetWall.normal.set(0, 0, 1);
+    this.targetWall.right.set(1, 0, 0);
+    this.targetWall.topY = targetBox.max.y;
+    this.targetWall.halfWidth = Math.max((targetBox.max.x - targetBox.min.x) / 2, 4);
+    this.resolveTargetFace(targetRoot, targetBox);
+
     // --- Island base + ocean.
     const baseGeometry = new THREE.CylinderGeometry(WORLD.cityRadius + 160, WORLD.cityRadius + 260, 60, 48);
     const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x0a0d13, roughness: 0.9, metalness: 0.05 });
@@ -197,6 +246,40 @@ export class City implements FlightSample {
 
     this.addRedLights(rng);
 
+  }
+
+  /**
+   * Finds the real depth of the tower's approach face by raycasting into it
+   * across the band that gets climbed. The bounding box is a poor stand-in:
+   * generated silhouettes are irregular, so a plane at box.max.z can float
+   * metres off the actual surface and the climber's grips with it.
+   */
+  private resolveTargetFace(towerRoot: THREE.Object3D, box: THREE.Box3): void {
+    const raycaster = new THREE.Raycaster();
+    const origin = new THREE.Vector3();
+    const inward = new THREE.Vector3(0, 0, -1);
+    const hits: number[] = [];
+    const climbBandTop = box.max.y - 2;
+    const climbBandBottom = box.max.y - 30;
+
+    for (let step = 0; step <= 6; step += 1) {
+      const y = THREE.MathUtils.lerp(climbBandBottom, climbBandTop, step / 6);
+      for (const lateral of [-2, 0, 2]) {
+        origin.set(WORLD.targetTowerPosition.x + lateral, y, box.max.z + 60);
+        raycaster.set(origin, inward);
+        const hit = raycaster.intersectObject(towerRoot, true)[0];
+        if (hit) hits.push(hit.point.z);
+      }
+    }
+
+    if (hits.length === 0) {
+      this.targetWall.origin.set(WORLD.targetTowerPosition.x, 0, box.max.z);
+      return;
+    }
+    // Median resists the odd spike of ornamentation on an irregular facade.
+    hits.sort((a, b) => a - b);
+    const faceZ = hits[Math.floor(hits.length / 2)];
+    this.targetWall.origin.set(WORLD.targetTowerPosition.x, 0, faceZ);
   }
 
   /** Blinks the rooftop aircraft-warning beacons out of phase. */

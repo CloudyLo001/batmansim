@@ -3,7 +3,15 @@ import { CapeWing } from '../systems/CapeWing';
 import { disposeObject3D } from '../utils/dispose';
 
 export type BatmanClipRole = 'falling' | 'diveLand' | 'crouch';
-export type BatmanState = 'skydive' | 'glide' | 'dive' | 'flare' | 'perch';
+export type BatmanState =
+  | 'skydive'
+  | 'glide'
+  | 'dive'
+  | 'flare'
+  | 'catch'
+  | 'climb'
+  | 'impact'
+  | 'perch';
 
 const TARGET_HEIGHT = 2.05;
 
@@ -25,11 +33,18 @@ const POSES: Record<BatmanState, PoseTargets> = {
   glide: { spread: 1, prone: 1, flightPose: 1, armTuck: 0, clip: null },
   dive: { spread: 0.22, prone: 1, flightPose: 1, armTuck: 1, clip: null },
   flare: { spread: 1.3, prone: 0.15, flightPose: 0.8, armTuck: -0.35, clip: null },
+  // Catch and climb run no clip and no flight pose: the limbs belong to the IK
+  // solver, and anything else writing those bones would fight it.
+  catch: { spread: 0.2, prone: 0, flightPose: 0, armTuck: 0, clip: null },
+  // Failed catch: limbs flung wide and the cape caught open, so the tumble
+  // reads as lost control rather than a held pose.
+  impact: { spread: 0.75, prone: 0.5, flightPose: 0.45, armTuck: -0.7, clip: null },
+  climb: { spread: 0.12, prone: 0, flightPose: 0, armTuck: 0, clip: null },
   perch: { spread: 0.1, prone: 0, flightPose: 0, armTuck: 0, clip: 'crouch' },
 };
 
 /** Bone names in the skeleton Mint's rigging pass produces. */
-interface Rig {
+export interface Rig {
   hips?: THREE.Bone;
   spine?: THREE.Bone;
   spine01?: THREE.Bone;
@@ -40,10 +55,14 @@ interface Rig {
   rightArm?: THREE.Bone;
   leftForeArm?: THREE.Bone;
   rightForeArm?: THREE.Bone;
+  leftHand?: THREE.Bone;
+  rightHand?: THREE.Bone;
   leftUpLeg?: THREE.Bone;
   rightUpLeg?: THREE.Bone;
   leftLeg?: THREE.Bone;
   rightLeg?: THREE.Bone;
+  leftFoot?: THREE.Bone;
+  rightFoot?: THREE.Bone;
 }
 
 /**
@@ -62,10 +81,19 @@ export class Batman {
   private readonly modelRoot = new THREE.Group();
   private readonly mixer: THREE.AnimationMixer;
   private readonly actions = new Map<BatmanClipRole, THREE.AnimationAction>();
-  private readonly rig: Rig = {};
+  /** Exposed so the climb solver can drive the limbs directly. */
+  readonly rig: Rig = {};
   private readonly bindRotations = new Map<THREE.Bone, THREE.Quaternion>();
   private readonly scratchQuat = new THREE.Quaternion();
   private readonly scratchEuler = new THREE.Euler();
+
+  /**
+   * Forces the prone blend instead of easing toward the pose target. The wall
+   * beats need the torso upright by an exact moment, and damping toward it is
+   * frame-rate dependent — at low frame rates he was still folded forward,
+   * swinging his shoulders straight through the building.
+   */
+  proneOverride: number | null = null;
 
   private state: BatmanState = 'glide';
   private readonly pose: PoseTargets = { ...POSES.glide };
@@ -145,9 +173,12 @@ export class Batman {
     this.time += delta;
 
     const target = POSES[this.state];
-    const lambda = this.state === 'flare' || this.state === 'perch' ? 6.5 : 3.4;
+    // Impact beats snap; cruising poses ease.
+    const snap = this.state === 'flare' || this.state === 'perch'
+      || this.state === 'catch' || this.state === 'climb';
+    const lambda = snap ? 6.5 : 3.4;
     this.pose.spread = THREE.MathUtils.damp(this.pose.spread, target.spread, lambda, delta);
-    this.pose.prone = THREE.MathUtils.damp(this.pose.prone, target.prone, lambda, delta);
+    this.pose.prone = this.proneOverride ?? THREE.MathUtils.damp(this.pose.prone, target.prone, lambda, delta);
     this.pose.flightPose = THREE.MathUtils.damp(this.pose.flightPose, target.flightPose, lambda, delta);
     this.pose.armTuck = THREE.MathUtils.damp(this.pose.armTuck, target.armTuck, lambda, delta);
     this.impact = Math.max(0, this.impact - delta * 3.4);
@@ -194,10 +225,14 @@ export class Batman {
       rightarm: 'rightArm',
       leftforearm: 'leftForeArm',
       rightforearm: 'rightForeArm',
+      lefthand: 'leftHand',
+      righthand: 'rightHand',
       leftupleg: 'leftUpLeg',
       rightupleg: 'rightUpLeg',
       leftleg: 'leftLeg',
       rightleg: 'rightLeg',
+      leftfoot: 'leftFoot',
+      rightfoot: 'rightFoot',
     };
     const slot = map[key];
     if (slot && !rig[slot]) rig[slot] = bone;
