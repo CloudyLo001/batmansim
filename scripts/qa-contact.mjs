@@ -1,5 +1,6 @@
 /**
- * Verifies the contact-restart rule and the absence of the climbing ending.
+ * Verifies the contact-restart rule, the landing-pad win, and the absence of
+ * the old catch-and-climb ending.
  *
  * Each case places the hero just above a surface and lets the real game loop
  * run. A pass means the screen fade engaged and the title screen came back —
@@ -137,21 +138,108 @@ const blimp = await crashCase('blimp', () => {
   return `blimp at y=${unit.position.y.toFixed(0)}`;
 });
 
-// --- The climbing ending must be gone entirely. ---
-const endCardGone = await page.evaluate(() => !document.querySelector('#end-card'));
+// --- The landing tower's shaft is solid: hitting its side is still a crash.
+// This is what proves the landable deck did not make the whole tower passable. ---
+const shaft = await crashCase('landing tower shaft', () => {
+  const d = window.__KNIGHTFALL_DEBUG__;
+  const pad = d.city.landingPad;
+  d.flight.reset(new d.THREE.Vector3(pad.center.x, pad.roofY - 90, pad.center.z + 150), Math.PI, 90);
+  return `shaft at y=${(pad.roofY - 90).toFixed(0)}`;
+});
+
+/** Starts a fresh run and places the hero, without waiting for any reset. */
+const flyFrom = async (place) => {
+  await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__.setState('active-play'));
+  await page.waitForFunction(
+    () => document.querySelector('#title-screen')?.hidden === true,
+    undefined,
+    { timeout: 30000 },
+  );
+  return page.evaluate(place);
+};
+
+// --- Touching the deck wins the run. ---
+const landedSpot = await flyFrom(() => {
+  const d = window.__KNIGHTFALL_DEBUG__;
+  const pad = d.city.landingPad;
+  // Two metres over the deck: inside the pad band on the very next step.
+  d.flight.reset(new d.THREE.Vector3(pad.center.x, pad.roofY + 2, pad.center.z), Math.PI, 40);
+  return `deck centre, y=${(pad.roofY + 2).toFixed(0)}`;
+});
+// The landing beat is LANDING_DURATION of SIMULATED time. Software rendering
+// manages barely 1 fps here and Loop clamps delta to 50 ms, so those 3.4 s cost
+// well over a minute of wall clock. This wait has to be enormous.
+await page.waitForFunction(
+  () => window.__THREE_GAME_DIAGNOSTICS__?.complete === true,
+  undefined,
+  { timeout: 300000 },
+);
+await page.waitForFunction(
+  () => document.querySelector('#mission-complete')?.classList.contains('visible') ?? false,
+  undefined,
+  { timeout: 60000 },
+).catch(() => {});
+const cardShown = await page.evaluate(
+  () => document.querySelector('#mission-complete')?.classList.contains('visible') ?? false,
+);
+console.log(`pad landing        ${cardShown ? 'COMPLETE' : 'NO CARD'} (${landedSpot})`);
+
+// Dismissing the card must return to the title WITHOUT the same event starting
+// a fresh run — the capture-phase handler in MissionComplete is what stops it.
+await page.waitForTimeout(1500); // clear the card's arm delay
+await page.keyboard.press('Enter');
+await page.waitForTimeout(2000);
+const dismissed = await titleVisible();
+console.log(`card dismiss       ${dismissed ? 'BACK AT TITLE' : 'DID NOT RETURN'}`);
+
+// --- The phantom-slab regression: flying PAST the tower at deck height must do
+// nothing at all. A height-field stamp would have spread a 300x200m invisible
+// slab here and reset the run in clear air. ---
+await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__.setState('active-play'));
+const nearMissSpot = await flyFrom(() => {
+  const d = window.__KNIGHTFALL_DEBUG__;
+  const pad = d.city.landingPad;
+  const offset = pad.radius + 45;
+  d.flight.reset(
+    new d.THREE.Vector3(pad.center.x + offset, pad.roofY, pad.center.z + 260),
+    Math.PI,
+    70,
+  );
+  return `${offset.toFixed(0)}m aside at deck height`;
+});
+// Fly him all the way past the tower. Condition-based, not a fixed delay: at
+// ~1 fps a timed wait covers only a few metres of travel and proves nothing.
+await page.waitForFunction(
+  () => {
+    const dg = window.__THREE_GAME_DIAGNOSTICS__;
+    if (!dg) return false;
+    if (dg.phase !== 'glide') return true; // something fired — stop and report
+    const padZ = window.__KNIGHTFALL_DEBUG__.city.landingPad.center.z;
+    return dg.player.position.z < padZ - 120;
+  },
+  undefined,
+  { timeout: 300000 },
+);
+const nearMissClean = await page.evaluate(
+  () => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'glide',
+);
+console.log(`near miss          ${nearMissClean ? 'STILL FLYING' : 'FALSE CONTACT'} (${nearMissSpot})`);
+
+// --- The old catch-and-climb ending must be gone entirely. 'complete' is
+// deliberately NOT in this list any more: it is a real state again. ---
 await page.evaluate(() => {
-  for (const name of ['catch', 'climb', 'outro', 'complete']) {
+  for (const name of ['catch', 'climb', 'outro']) {
     window.__THREE_GAME_TEST_HOOKS__.setState(name);
   }
 });
 await page.waitForTimeout(400);
-const climbStatesGone = ['catch', 'climb', 'outro', 'complete']
+const climbStatesGone = ['catch', 'climb', 'outro']
   .every((name) => warnings.some((w) => w.includes(`Unknown test state: ${name}`)));
 
-console.log(`end card removed  ${endCardGone ? 'OK' : 'STILL PRESENT'}`);
-console.log(`climb phases gone ${climbStatesGone ? 'OK' : 'STILL REACHABLE'}`);
+console.log(`climb phases gone  ${climbStatesGone ? 'OK' : 'STILL REACHABLE'}`);
 
-const ok = building && facade && ocean && streets && blimp && endCardGone && climbStatesGone;
+const ok = building && facade && ocean && streets && blimp
+  && shaft && cardShown && dismissed && nearMissClean && climbStatesGone;
 console.log(ok ? 'ALL OK' : 'FAILURES ABOVE');
 await browser.close();
 process.exit(ok ? 0 : 1);

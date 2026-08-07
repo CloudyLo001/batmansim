@@ -9,7 +9,10 @@ export const WORLD = {
   jumpPosition: new THREE.Vector3(0, 1500, 2350),
   /** The signal tower on the far side of the island. */
   towerPosition: new THREE.Vector3(-140, 0, -1280),
-  /** The marked skyscraper the player flies to, catches, and climbs. */
+  /**
+   * The lit landing tower the player is flying to. Its roof deck is the only
+   * landable surface in the world; everything else ends the run.
+   */
   targetTowerPosition: new THREE.Vector3(260, 0, -1020),
   /** Height of the gargoyle perch above the tower base. */
   towerPerchHeight: 342,

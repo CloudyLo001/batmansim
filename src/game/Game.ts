@@ -10,6 +10,7 @@ import { City, HORIZON_COLOR } from '../systems/City';
 import { FlightModel } from '../systems/FlightModel';
 import { Hud } from '../systems/Hud';
 import { Lightning } from '../systems/Lightning';
+import { MissionComplete } from '../systems/MissionComplete';
 import { PauseMenu } from '../systems/PauseMenu';
 import { PostFX } from '../systems/PostFX';
 import { Rain } from '../systems/Rain';
@@ -22,6 +23,7 @@ import {
   BLIMP_CONTACT_RADIUS,
   CONTACT_CLEARANCE,
   CRASH_FADE_DURATION,
+  LANDING_DURATION,
   Phase,
 } from './Phases';
 import { WORLD } from './World';
@@ -47,6 +49,7 @@ export class Game {
   );
 
   private readonly titleScreen = new TitleScreen(() => this.beginGlide());
+  private readonly missionComplete = new MissionComplete(() => this.restart());
   private readonly screenFade = new ScreenFade();
 
   private rng = createSeededRandom(7);
@@ -71,6 +74,10 @@ export class Game {
   private postFx: PostFX | null = null;
 
   private readonly titleAnchor = new THREE.Vector3();
+  /** Where he touched the deck, and where the landing beat sets him down. */
+  private readonly landingFrom = new THREE.Vector3();
+  private readonly landingTo = new THREE.Vector3();
+  private landingHeading = 0;
   private readonly cameraVelocity = new THREE.Vector3();
   private readonly previousCameraPosition = new THREE.Vector3();
   private readonly scratch = new THREE.Vector3();
@@ -110,6 +117,7 @@ export class Game {
     this.input.dispose();
     this.pauseMenu.dispose();
     this.titleScreen.dispose();
+    this.missionComplete.dispose();
     this.postFx?.dispose();
     this.batman?.dispose();
     this.city?.dispose();
@@ -206,6 +214,7 @@ export class Game {
     this.hud.setHudVisible(false);
     this.hud.hidePrompt();
     this.hud.setControlHintVisible(false);
+    this.missionComplete.hide();
     this.titleAnchor.copy(WORLD.jumpPosition).add(this.scratch.set(0, -360, -520));
     this.batman.setState('glide');
     this.batman.proneOverride = null;
@@ -221,6 +230,7 @@ export class Game {
     this.phaseTime = 0;
     this.rig.cinematic = false;
     this.titleScreen.hide();
+    this.missionComplete.hide();
     // Departs from exactly where he hovered, so there is no cut on start.
     this.flight.reset(this.titleAnchor, Math.PI, 46);
     this.batman.setState('glide');
@@ -251,17 +261,52 @@ export class Game {
     this.screenFade.setOpaque(true);
   }
 
-  private restart(): void {
-    this.screenFade.setOpaque(false);
-    this.beginTitle();
+  /**
+   * He put a hand on the deck. Control is taken away and a short scripted beat
+   * flares him out and sets him down on the emblem.
+   */
+  private beginLanding(): void {
+    const city = this.city;
+    if (!this.batman || !city) return;
+    this.phase = Phase.Landing;
+    this.phaseTime = 0;
+    this.rig.cinematic = true;
+    this.hud.setHudVisible(false);
+    this.hud.hidePrompt();
+    this.hud.setControlHintVisible(false);
+    this.landingFrom.copy(this.flight.position);
+    this.landingHeading = this.flight.heading;
+
+    // Settle where he touched, pulled inboard so he never ends on the rim.
+    const pad = city.landingPad;
+    this.landingTo.copy(this.flight.position).sub(pad.center);
+    this.landingTo.y = 0;
+    const radial = this.landingTo.length();
+    const inboard = pad.radius * 0.55;
+    if (radial > inboard) this.landingTo.multiplyScalar(inboard / radial);
+    this.landingTo.add(pad.center);
+    // The perch pose stands him upright, so the group origin is at his feet.
+    this.landingTo.y = pad.roofY + 0.05;
+
+    this.batman.setState('flare');
+    this.batman.proneOverride = null;
+    this.lightning?.forceStrike();
   }
 
-  /** A point just off the target tower's climbable face, for staging QA runs. */
-  private towerFace(out: THREE.Vector3, wall: City['targetWall']): THREE.Vector3 {
-    return out
-      .copy(wall.origin)
-      .setY(wall.topY - 15)
-      .addScaledVector(wall.normal, 6);
+  /** The run is won. He holds the perch behind the card until it is dismissed. */
+  private beginComplete(): void {
+    if (!this.batman) return;
+    this.phase = Phase.Complete;
+    this.phaseTime = 0;
+    this.batman.setState('perch');
+    this.rig.addImpulse(0.6);
+    this.missionComplete.show();
+  }
+
+  private restart(): void {
+    this.screenFade.setOpaque(false);
+    this.missionComplete.hide();
+    this.beginTitle();
   }
 
   /**
@@ -300,6 +345,12 @@ export class Game {
         break;
       case Phase.Glide:
         this.updateGlide(animDelta);
+        break;
+      case Phase.Landing:
+        this.updateLanding(animDelta);
+        break;
+      case Phase.Complete:
+        this.updateComplete(animDelta);
         break;
       case Phase.Crash:
         this.updateCrash(animDelta);
@@ -356,9 +407,17 @@ export class Game {
     this.input.update(delta);
     this.flight.update(delta, this.input);
 
-    // Contact ends the run. Checked before the pose is applied so the held
-    // frame shows him at the surface rather than a step past it.
-    if (this.hasContact(city)) {
+    // Contact ends the run — except the deck, which wins it. Both are checked
+    // before the pose is applied so the held frame shows him at the surface
+    // rather than a step past it, and the pad is checked FIRST so a landing can
+    // never be stolen by the generic surface rule or by a passing blimp.
+    const towerContact = city.landingTowerContact(this.flight.position);
+    if (towerContact === 'pad') {
+      batman.group.position.copy(this.flight.position);
+      this.beginLanding();
+      return;
+    }
+    if (towerContact === 'shaft' || this.hasContact(city)) {
       batman.group.position.copy(this.flight.position);
       this.beginCrash();
       return;
@@ -393,7 +452,88 @@ export class Game {
       if (this.promptTimer <= 0) this.hud.hidePrompt();
     }
 
-    this.hud.update(this.flight.heading);
+    this.hud.update(
+      this.flight.heading,
+      city.landingPad.center,
+      this.flight.position.distanceTo(city.landingPad.center),
+      this.camera,
+    );
+  }
+
+  /**
+   * The landing beat. He arcs the last few metres onto the emblem while the
+   * camera swings in from the side he arrived on and closes to a tight hold.
+   */
+  private updateLanding(delta: number): void {
+    const batman = this.batman;
+    const city = this.city;
+    if (!batman || !city) return;
+    this.phaseTime += delta;
+    const pad = city.landingPad;
+
+    const settle = Math.min(1, this.phaseTime / LANDING_DURATION);
+    const progress = Math.min(1, this.phaseTime / (LANDING_DURATION * 0.6));
+    const eased = 1 - Math.pow(1 - progress, 3);
+
+    const previous = this.scratchB.copy(batman.group.position);
+    batman.group.position.lerpVectors(this.landingFrom, this.landingTo, eased);
+    // A shallow arc over the rim rather than a straight line into the deck.
+    batman.group.position.y += Math.sin(eased * Math.PI) * 24 * (1 - eased * 0.55);
+    batman.group.rotation.order = 'YXZ';
+    batman.group.rotation.y = this.landingHeading;
+    batman.group.rotation.x = Math.sin(eased * Math.PI) * -0.5;
+    batman.group.rotation.z = THREE.MathUtils.lerp(this.flight.roll, 0, eased);
+
+    if (progress >= 1) batman.setState('perch');
+    const velocity = delta > 0
+      ? this.scratch.copy(batman.group.position).sub(previous).divideScalar(delta)
+      : this.scratch.set(0, 0, 0);
+    batman.update(delta, velocity, 0.4 + Math.sin(eased * Math.PI) * 1.7);
+
+    // Orbit the pad centre from the bearing he came in on. Staying outside
+    // pad.radius is what guarantees the camera never enters the deck.
+    const baseAngle = Math.atan2(
+      this.landingFrom.x - pad.center.x,
+      this.landingFrom.z - pad.center.z,
+    );
+    const orbitAngle = baseAngle - 0.7 + settle * 0.7;
+    const radius = pad.radius + THREE.MathUtils.lerp(40, 16, settle);
+    this.scratch.set(
+      pad.center.x + Math.sin(orbitAngle) * radius,
+      Math.max(
+        batman.group.position.y + THREE.MathUtils.lerp(16, 3.4, settle),
+        pad.roofY + 3.4,
+      ),
+      pad.center.z + Math.cos(orbitAngle) * radius,
+    );
+    this.scratchB.copy(batman.group.position);
+    this.scratchB.y += 1.4;
+    this.rig.setCinematicFrame(this.scratch, this.scratchB, 46);
+
+    if (this.phaseTime >= LANDING_DURATION) this.beginComplete();
+  }
+
+  /** Held on the perch behind the card: a slow drift around the emblem. */
+  private updateComplete(delta: number): void {
+    const batman = this.batman;
+    const city = this.city;
+    if (!batman || !city) return;
+    this.phaseTime += delta;
+    const pad = city.landingPad;
+
+    batman.update(delta, this.scratch.set(0, 0, 0), 0.3);
+
+    const angle = Math.PI
+      + Math.sin(this.phaseTime * 0.11) * 0.22
+      + this.phaseTime * 0.03;
+    const radius = pad.radius + 14;
+    this.scratch.set(
+      pad.center.x + Math.sin(angle) * radius,
+      pad.roofY + 4.2,
+      pad.center.z + Math.cos(angle) * radius,
+    );
+    this.scratchB.set(batman.group.position.x, pad.roofY + 1.3, batman.group.position.z);
+    this.rig.setCinematicFrame(this.scratch, this.scratchB, 44);
   }
 
   /**
@@ -473,24 +613,45 @@ export class Game {
       setState: (name: string) => {
         // Jumping straight into a phase must clear the menu overlay too.
         if (name !== 'title') this.titleScreen.hide();
+        const pad = this.city?.landingPad;
         if (name === 'active-play') this.beginGlide();
-        else if (name === 'near-tower' || name === 'crash') {
-          // Nothing on the HUD points at the tower any more, but it is still
-          // the most distinctive landmark to stage QA shots against.
-          const wall = this.city?.targetWall;
-          if (!wall) return;
-          this.towerFace(this.scratch, wall);
-          if (name === 'near-tower') {
-            // QA: drop into the glide 300m out from the tower on approach.
-            this.beginGlide();
-            this.flight.reset(this.scratch.add(this.scratchB.set(0, 40, 300)), Math.PI, 56);
-            this.rig.snapBehind(this.flight.position, this.flight.heading, this.flight.pitch);
-          } else {
-            // QA: fly him into the tower's face from close range.
-            this.flight.reset(this.scratch.add(this.scratchB.set(0, 0, 40)), Math.PI, 50);
-            if (this.batman) this.batman.group.position.copy(this.flight.position);
-            this.beginCrash();
+        else if (name === 'near-pad' && pad) {
+          // QA: drop into the glide 300m out from the pad, 60m above the deck.
+          this.beginGlide();
+          this.flight.reset(
+            this.scratch.copy(pad.center).add(this.scratchB.set(0, 60, 300)),
+            Math.PI,
+            56,
+          );
+          this.rig.snapBehind(this.flight.position, this.flight.heading, this.flight.pitch);
+        } else if (name === 'land' && pad) {
+          // QA: 90m out on the deck plane, so the real landing beat plays out.
+          this.beginGlide();
+          this.flight.reset(
+            this.scratch.copy(pad.center).add(this.scratchB.set(0, 8, 90)),
+            Math.PI,
+            44,
+          );
+          this.beginLanding();
+        } else if (name === 'complete' && pad) {
+          // QA: snap straight to the held frame and card, for a stable shot.
+          this.landingHeading = Math.PI;
+          this.flight.reset(this.scratch.copy(pad.center).setY(pad.roofY + 0.05), Math.PI, 0);
+          if (this.batman) {
+            this.batman.group.position.copy(this.flight.position);
+            this.batman.group.rotation.set(0, Math.PI, 0);
+            this.batman.setState('perch');
+            this.batman.resetWing();
           }
+          this.rig.cinematic = true;
+          this.hud.setHudVisible(false);
+          this.hud.setControlHintVisible(false);
+          this.beginComplete();
+        } else if (name === 'crash' && pad) {
+          // QA: into the landing tower's shaft, well below the deck.
+          this.flight.reset(this.scratch.copy(pad.center).setY(pad.roofY - 90), Math.PI, 50);
+          if (this.batman) this.batman.group.position.copy(this.flight.position);
+          this.beginCrash();
         } else console.warn(`Unknown test state: ${name}`);
       },
       setPausedForScreenshot: (paused: boolean) => {
@@ -508,10 +669,10 @@ export class Game {
     window.__THREE_GAME_DIAGNOSTICS__ = {
       frame: this.frame,
       elapsed: this.elapsed,
-      // There is no win state: the run ends by crashing, so it never completes.
-      score: 0,
+      // The single objective is the landing pad: reaching it wins the run.
+      score: this.phase === Phase.Complete ? 1 : 0,
       targetScore: 1,
-      complete: false,
+      complete: this.phase === Phase.Complete,
       player: {
         position: {
           x: this.flight.position.x,

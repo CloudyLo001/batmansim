@@ -23,14 +23,20 @@ interface ThreeGameDiagnostics {
     height: number;
     dpr: number;
   };
-  /** Current experience phase: loading | intro | glide | landing | perched. */
+  /**
+   * Current experience phase:
+   * loading | title | glide | landing | complete | crash.
+   */
   phase: string;
 }
 
 interface ThreeGameTestHooks {
   /** Re-seed the game RNG; all gameplay randomness must flow through it. */
   seed(value: number): void;
-  /** Jump to a named state for baselines (scaffold: 'active-play' | 'complete'). */
+  /**
+   * Jump to a named state for baselines:
+   * 'active-play' | 'near-pad' | 'land' | 'complete' | 'crash'.
+   */
   setState(name: string): void;
   /** Freeze the simulation while continuing to render the current frame. */
   setPausedForScreenshot(paused: boolean): void;

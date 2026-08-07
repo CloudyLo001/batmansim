@@ -13,18 +13,27 @@ const CARDINALS: Array<[number, string]> = [
 ];
 
 /**
- * Diegetic Arkham-style DOM HUD: compass strip, center prompts, and the
- * bat-emblem loading screen.
+ * Diegetic Arkham-style DOM HUD: compass strip, a screen-projected objective
+ * marker with its range to the landing pad, center prompts, and the bat-emblem
+ * loading screen.
  */
 export class Hud {
   private readonly root = this.getElement('#hud');
   private readonly compassStrip = this.getElement('#compass-strip');
   private readonly compassWindow = this.getElement('#compass-window');
+  private readonly objectiveMarker = this.getElement('#objective-marker');
+  private readonly objectiveDistance = this.getElement('#objective-distance');
+  private readonly surveillanceTag = this.getElement('#surveillance-tag');
+  private readonly surveillanceRange = this.getElement('#surveillance-range');
   private readonly centerPrompt = this.getElement('#center-prompt');
   private readonly controlHint = this.getElement('#control-hint');
   private readonly loading = this.getElement('#loading');
   private readonly loadingFill = this.getElement('#loading-fill');
   private readonly loadingStatus = this.getElement('#loading-status');
+
+  private readonly projected = new THREE.Vector3();
+  private readonly forward = new THREE.Vector3();
+  private readonly toObjective = new THREE.Vector3();
 
   constructor() {
     this.buildCompass();
@@ -68,7 +77,12 @@ export class Hud {
 
   // ----- Per-frame update -----
 
-  update(heading: number): void {
+  update(
+    heading: number,
+    objectiveWorld: THREE.Vector3,
+    objectiveDistanceMeters: number,
+    camera: THREE.PerspectiveCamera,
+  ): void {
     // Compass: heading PI (facing -Z) reads as north.
     const compassDeg = THREE.MathUtils.euclideanModulo(
       -THREE.MathUtils.radToDeg(heading) + 180,
@@ -77,6 +91,28 @@ export class Hud {
     const windowWidth = this.compassWindow.clientWidth;
     const offset = -(compassDeg + 360) * PX_PER_DEGREE + windowWidth / 2;
     this.compassStrip.style.transform = `translateX(${offset}px)`;
+
+    // Objective diamond. `project()` MIRRORS x/y for points behind the eye, so
+    // testing its z would draw the marker on the wrong side of the screen mid
+    // turn; the view-direction dot is unambiguous.
+    camera.getWorldDirection(this.forward);
+    this.toObjective.copy(objectiveWorld).sub(camera.position);
+    if (this.toObjective.dot(this.forward) <= 0) {
+      this.objectiveMarker.style.opacity = '0';
+    } else {
+      this.projected.copy(objectiveWorld).project(camera);
+      const x = THREE.MathUtils.clamp((this.projected.x * 0.5 + 0.5) * 100, 4, 96);
+      const y = THREE.MathUtils.clamp((-this.projected.y * 0.5 + 0.5) * 100, 6, 90);
+      this.objectiveMarker.style.opacity = '1';
+      this.objectiveMarker.style.left = `${x}%`;
+      this.objectiveMarker.style.top = `${y}%`;
+    }
+    this.objectiveDistance.textContent = `${Math.max(0, Math.round(objectiveDistanceMeters))}m`;
+
+    // The range panel is always live, which is what keeps the pad findable in
+    // the frames the diamond is legitimately hidden behind the player.
+    this.surveillanceTag.classList.add('active');
+    this.surveillanceRange.textContent = String(Math.round(objectiveDistanceMeters));
   }
 
   private buildCompass(): void {

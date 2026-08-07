@@ -1,5 +1,7 @@
 import * as THREE from 'three';
+import { CONTACT_CLEARANCE, PAD_TOUCH_DEPTH } from '../game/Phases';
 import { WORLD } from '../game/World';
+import { traceBatSilhouette } from '../utils/batEmblem';
 
 export interface CityModels {
   spire: THREE.Object3D;
@@ -34,6 +36,26 @@ interface Placement {
 const GRID_CELL = 100;
 const GRID_HALF = 2400;
 
+/**
+ * The landing tower: a square shaft carrying an overhanging circular deck.
+ *
+ * The overhang is the whole trick. Because the deck reaches 18m past the shaft,
+ * the air under its rim is genuinely empty, so "he touched the deck" and "he
+ * flew into the side" fall out of the geometry instead of out of a tolerance
+ * fudge. See `landingTowerContact`.
+ */
+const LANDING_TOWER = {
+  /** Deck height. Taller than the 305m spires, so it owns the skyline. */
+  roofY: 470,
+  /** Half-width of the solid shaft. */
+  shaftRadius: 34,
+  /** Deck radius. The whole deck is the pad — any touch is a landing. */
+  padRadius: 52,
+};
+
+/** What a point is touching on the landing tower, if anything. */
+export type LandingContact = 'pad' | 'shaft' | null;
+
 /** Ocean disc radius; must stay inside the camera far plane. */
 const OCEAN_RADIUS = 7200;
 /** Mean colour of the skybox horizon band, sampled from the panorama. */
@@ -54,22 +76,22 @@ export class City {
   /** World Y of the spire tip where the bat-signal projector sits. */
   spireTopY = WORLD.towerPerchHeight;
 
-  /**
-   * The marked skyscraper the objective points at, and the vertical face the
-   * hero catches and climbs. Populated during construction.
-   */
-  readonly targetWall = {
-    origin: new THREE.Vector3(),
-    normal: new THREE.Vector3(0, 0, 1),
-    right: new THREE.Vector3(1, 0, 0),
-    topY: 0,
-    halfWidth: 12,
+  /** The objective: the lit deck on top of the landing tower. */
+  readonly landingPad = {
+    center: new THREE.Vector3(
+      WORLD.targetTowerPosition.x,
+      LANDING_TOWER.roofY,
+      WORLD.targetTowerPosition.z,
+    ),
+    radius: LANDING_TOWER.padRadius,
+    roofY: LANDING_TOWER.roofY,
   };
 
   private readonly heightGrid: Float32Array;
   private readonly gridSize: number;
   private readonly disposables: Array<{ dispose(): void }> = [];
   private beaconMaterial: THREE.PointsMaterial | null = null;
+  private padLightMaterial: THREE.PointsMaterial | null = null;
 
   constructor(models: CityModels, rng: () => number) {
     this.gridSize = Math.ceil((GRID_HALF * 2) / GRID_CELL);
@@ -102,7 +124,7 @@ export class City {
         // Clear space around the signal tower so it reads as the landmark.
         const toTower = Math.hypot(x - WORLD.towerPosition.x, z - WORLD.towerPosition.z);
         if (toTower < 300) continue;
-        // Keep the approach to the climbable face clear of other geometry.
+        // Keep the approach to the landing pad clear of other geometry.
         const toTarget = Math.hypot(
           x - WORLD.targetTowerPosition.x,
           z - WORLD.targetTowerPosition.z,
@@ -162,38 +184,6 @@ export class City {
     // Deliberately not stamped into the height field: the tower is the
     // destination, so the glide floor must let the player descend onto it.
 
-    // --- The marked target skyscraper: the objective and the climbable face.
-    // Cloned so re-fitting it does not disturb the instanced copies, and, like
-    // the signal tower, deliberately left out of the height field so the glide
-    // floor lets the player descend onto its face instead of over it.
-    const targetHeight = 430;
-    const targetFootprint = 58;
-    const targetModel = models.slab.clone(true);
-    fitModel(targetModel, targetHeight);
-    // Fitting by height alone leaves the footprint hundreds of metres across,
-    // which reads as a landmass rather than a tower. Squeeze the plan to a real
-    // skyscraper footprint; the facade is boxy enough to take it.
-    const fitted = new THREE.Box3().setFromObject(targetModel);
-    const fittedWidth = Math.max(fitted.max.x - fitted.min.x, 0.001);
-    const squeeze = targetFootprint / fittedWidth;
-    targetModel.scale.x *= squeeze;
-    targetModel.scale.z *= squeeze;
-    targetModel.position.x *= squeeze;
-    targetModel.position.z *= squeeze;
-    const targetRoot = new THREE.Group();
-    targetRoot.position.set(WORLD.targetTowerPosition.x, 0, WORLD.targetTowerPosition.z);
-    targetRoot.add(targetModel);
-    this.group.add(targetRoot);
-    targetRoot.updateMatrixWorld(true);
-
-    const targetBox = new THREE.Box3().setFromObject(targetRoot);
-    // The face that greets the approach: the player flies inbound along -Z.
-    this.targetWall.normal.set(0, 0, 1);
-    this.targetWall.right.set(1, 0, 0);
-    this.targetWall.topY = targetBox.max.y;
-    this.targetWall.halfWidth = Math.max((targetBox.max.x - targetBox.min.x) / 2, 4);
-    this.resolveTargetFace(targetRoot, targetBox);
-
     // --- Island base + ocean.
     const baseGeometry = new THREE.CylinderGeometry(WORLD.cityRadius + 160, WORLD.cityRadius + 260, 60, 48);
     const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x0a0d13, roughness: 0.9, metalness: 0.05 });
@@ -246,46 +236,188 @@ export class City {
 
     this.addRedLights(rng);
 
+    // --- The landing tower: the objective, and the only landable surface.
+    // Last, because it borrows the city's shared beacon material for its own
+    // warning lights so they blink in phase with every other rooftop.
+    this.buildLandingTower();
   }
 
   /**
-   * Finds the real depth of the tower's approach face by raycasting into it
-   * across the band that gets climbed. The bounding box is a poor stand-in:
-   * generated silhouettes are irregular, so a plane at box.max.z can float
-   * metres off the actual surface and the climber's grips with it.
+   * Classifies a point against the landing tower.
+   *
+   * The tower is deliberately absent from the height field, and this replaces
+   * it. At 100m cells a stamp would spread a 300x200m invisible slab at roof
+   * height: the player would die in clear air beside the tower, and could never
+   * descend onto the deck anywhere but dead centre. This test is exact, and it
+   * is also what separates a landing from a crash — see LANDING_TOWER.
    */
-  private resolveTargetFace(towerRoot: THREE.Object3D, box: THREE.Box3): void {
-    const raycaster = new THREE.Raycaster();
-    const origin = new THREE.Vector3();
-    const inward = new THREE.Vector3(0, 0, -1);
-    const hits: number[] = [];
-    const climbBandTop = box.max.y - 2;
-    const climbBandBottom = box.max.y - 30;
-
-    for (let step = 0; step <= 6; step += 1) {
-      const y = THREE.MathUtils.lerp(climbBandBottom, climbBandTop, step / 6);
-      for (const lateral of [-2, 0, 2]) {
-        origin.set(WORLD.targetTowerPosition.x + lateral, y, box.max.z + 60);
-        raycaster.set(origin, inward);
-        const hit = raycaster.intersectObject(towerRoot, true)[0];
-        if (hit) hits.push(hit.point.z);
-      }
-    }
-
-    if (hits.length === 0) {
-      this.targetWall.origin.set(WORLD.targetTowerPosition.x, 0, box.max.z);
-      return;
-    }
-    // Median resists the odd spike of ornamentation on an irregular facade.
-    hits.sort((a, b) => a - b);
-    const faceZ = hits[Math.floor(hits.length / 2)];
-    this.targetWall.origin.set(WORLD.targetTowerPosition.x, 0, faceZ);
+  landingTowerContact(point: THREE.Vector3): LandingContact {
+    const deck = this.landingPad.roofY;
+    if (point.y > deck + CONTACT_CLEARANCE) return null; // clean air above
+    const radial = Math.hypot(
+      point.x - this.landingPad.center.x,
+      point.z - this.landingPad.center.z,
+    );
+    if (radial <= this.landingPad.radius && point.y >= deck - PAD_TOUCH_DEPTH) return 'pad';
+    if (radial <= LANDING_TOWER.shaftRadius && point.y > WORLD.oceanLevel) return 'shaft';
+    return null;
   }
 
-  /** Blinks the rooftop aircraft-warning beacons out of phase. */
+  /**
+   * The landing tower. Built from primitives rather than the generated set
+   * because the roof has to be genuinely flat and the emblem has to sit on it
+   * at an exactly known height — a fitted GLB crown gives neither.
+   *
+   * Deliberately NOT stamped into the height field. See `landingTowerContact`
+   * for why; stamping it would make the pad unreachable.
+   */
+  private buildLandingTower(): void {
+    const { roofY, shaftRadius, padRadius } = LANDING_TOWER;
+    const root = new THREE.Group();
+    root.position.set(WORLD.targetTowerPosition.x, 0, WORLD.targetTowerPosition.z);
+
+    // --- Shaft.
+    const shaftGeometry = new THREE.BoxGeometry(shaftRadius * 1.88, roofY, shaftRadius * 1.88);
+    const shaftMaterial = new THREE.MeshStandardMaterial({
+      color: 0x0a0f16,
+      roughness: 0.82,
+      metalness: 0.18,
+    });
+    const shaft = new THREE.Mesh(shaftGeometry, shaftMaterial);
+    shaft.position.y = roofY / 2;
+    root.add(shaft);
+    this.disposables.push(shaftGeometry, shaftMaterial);
+
+    // Setback fins, so the silhouette is not a plain slab against the sky.
+    const finGeometry = new THREE.BoxGeometry(8, roofY * 0.88, 17);
+    const finMaterial = new THREE.MeshStandardMaterial({
+      color: 0x0d131c,
+      roughness: 0.74,
+      metalness: 0.26,
+    });
+    this.disposables.push(finGeometry, finMaterial);
+    for (let index = 0; index < 4; index += 1) {
+      const fin = new THREE.Mesh(finGeometry, finMaterial);
+      fin.position.y = (roofY * 0.88) / 2;
+      fin.rotation.y = (index * Math.PI) / 2;
+      fin.translateZ(shaftRadius * 0.94);
+      root.add(fin);
+    }
+
+    // --- Vertical edge glow up the corners, so it reads as lit from far off.
+    // Everything on this tower stays tone-mapped: the bloom pass triggers at
+    // luma 0.72, and an untone-mapped cyan sits well above that, which turns
+    // the whole deck into a white disc at close range.
+    const edgeGeometry = new THREE.BoxGeometry(1.6, roofY * 0.92, 1.6);
+    const edgeMaterial = new THREE.MeshBasicMaterial({ color: 0x3d8ba8 });
+    this.disposables.push(edgeGeometry, edgeMaterial);
+    const corner = shaftRadius * 0.94;
+    const edgePoints: number[] = [];
+    for (const [cx, cz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const edge = new THREE.Mesh(edgeGeometry, edgeMaterial);
+      edge.position.set(corner * cx, (roofY * 0.92) / 2, corner * cz);
+      root.add(edge);
+      for (let step = 0; step < 40; step += 1) {
+        edgePoints.push(corner * cx, (step / 39) * roofY * 0.92, corner * cz);
+      }
+    }
+    const edgeGlowMaterial = makeGlowMaterial(0x4f9ec2, 11);
+    this.disposables.push(edgeGlowMaterial);
+    root.add(makeGlowPoints(edgePoints, edgeGlowMaterial));
+
+    // --- Deck. Positioned so its TOP FACE lands exactly on roofY: the collider
+    // plane and the visible surface must be the same number or he floats/sinks.
+    const deckGeometry = new THREE.CylinderGeometry(padRadius, padRadius + 2, 3, 48);
+    const deckMaterial = new THREE.MeshStandardMaterial({
+      color: 0x11181f,
+      roughness: 0.68,
+      metalness: 0.3,
+      emissive: 0x0b1c26,
+    });
+    const deck = new THREE.Mesh(deckGeometry, deckMaterial);
+    deck.position.y = roofY - 1.5;
+    root.add(deck);
+    this.disposables.push(deckGeometry, deckMaterial);
+
+    // --- Pad rings.
+    const ringMaterial = new THREE.MeshBasicMaterial({ color: 0x4ea6c8 });
+    this.disposables.push(ringMaterial);
+    for (const radius of [padRadius - 2, padRadius * 0.58]) {
+      const ringGeometry = new THREE.TorusGeometry(radius, 0.9, 8, 72);
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = roofY + 0.4;
+      root.add(ring);
+      this.disposables.push(ringGeometry);
+    }
+
+    // --- Approach lights around the rim, pulsing in `update`.
+    const padLightPositions: number[] = [];
+    for (let index = 0; index < 28; index += 1) {
+      const angle = (index / 28) * Math.PI * 2;
+      padLightPositions.push(
+        Math.cos(angle) * (padRadius - 4),
+        roofY + 1.4,
+        Math.sin(angle) * (padRadius - 4),
+      );
+    }
+    this.padLightMaterial = makeGlowMaterial(0x6fc0dd, 10);
+    this.disposables.push(this.padLightMaterial);
+    root.add(makeGlowPoints(padLightPositions, this.padLightMaterial));
+
+    // --- The emblem on the deck.
+    const emblemTexture = makeBatPadTexture();
+    // Painted on, not projected: additive blending here stacked on top of the
+    // deck lighting and the bloom pass and turned the emblem into a white blob.
+    const emblemMaterial = new THREE.MeshBasicMaterial({
+      map: emblemTexture,
+      transparent: true,
+      depthWrite: false,
+      opacity: 0.95,
+    });
+    const emblemGeometry = new THREE.PlaneGeometry(padRadius * 1.55, padRadius * 1.55);
+    const emblem = new THREE.Mesh(emblemGeometry, emblemMaterial);
+    // The texture's up-vector is the emblem's head, and rotateX(-PI/2) maps it
+    // to world -Z. The player flies inbound along -Z, so -Z is the far distance
+    // in his view — i.e. screen up — and the head reads the right way up. Do
+    // not add a Z roll here: it turns the emblem upside down on the approach.
+    emblem.rotation.set(-Math.PI / 2, 0, 0);
+    emblem.position.y = roofY + 0.35;
+    emblem.renderOrder = 2;
+    root.add(emblem);
+    this.disposables.push(emblemGeometry, emblemMaterial, emblemTexture);
+
+    // --- Aircraft-warning beacons, blinking with the rest of the city.
+    if (this.beaconMaterial) {
+      const beaconPositions: number[] = [];
+      for (let index = 0; index < 4; index += 1) {
+        const angle = (index / 4) * Math.PI * 2 + Math.PI / 4;
+        beaconPositions.push(
+          Math.cos(angle) * (padRadius - 1),
+          roofY + 3,
+          Math.sin(angle) * (padRadius - 1),
+        );
+      }
+      root.add(makeGlowPoints(beaconPositions, this.beaconMaterial));
+    }
+
+    // Enough to lift the deck and the emblem out of the night without washing
+    // them out at close range, where the landing camera sits.
+    const padLight = new THREE.PointLight(0x7fd8ff, 260, 520, 2);
+    padLight.position.y = roofY + 22;
+    root.add(padLight);
+
+    this.group.add(root);
+  }
+
+  /** Blinks the rooftop aircraft-warning beacons and the pad's approach lights. */
   update(elapsed: number): void {
-    if (!this.beaconMaterial) return;
-    this.beaconMaterial.opacity = 0.55 + Math.sin(elapsed * 2.1) * 0.35;
+    if (this.beaconMaterial) {
+      this.beaconMaterial.opacity = 0.55 + Math.sin(elapsed * 2.1) * 0.35;
+    }
+    if (this.padLightMaterial) {
+      this.padLightMaterial.opacity = 0.6 + Math.sin(elapsed * 1.4) * 0.3;
+    }
   }
 
   /**
@@ -484,6 +616,38 @@ function makeGlowTexture(): THREE.CanvasTexture {
   context.fillStyle = gradient;
   context.fillRect(0, 0, size, size);
   return new THREE.CanvasTexture(canvas);
+}
+
+/**
+ * The bat emblem painted on the landing deck.
+ *
+ * Drawn with a wide cyan shadow and filled twice so the halo survives being
+ * read from 300m up in the rain; the material that carries it is unlit and
+ * additive for the same reason.
+ */
+function makeBatPadTexture(): THREE.CanvasTexture {
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Could not create landing pad emblem context.');
+
+  context.translate(256, 268);
+  context.scale(2.45, 2.45); // the 172-wide emblem fills ~421px of the 512
+  // Kept under the bloom pass's 0.72 luma threshold on purpose. A brighter
+  // fill blooms into a featureless white blob and the silhouette is lost,
+  // which is the opposite of what a landing marker is for.
+  context.shadowColor = 'rgba(110, 190, 230, 0.6)';
+  context.shadowBlur = 12;
+  context.fillStyle = '#8fb6cc';
+  traceBatSilhouette(context);
+  context.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  return texture;
 }
 
 let sharedGlowTexture: THREE.CanvasTexture | null = null;

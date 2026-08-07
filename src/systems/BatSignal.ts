@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { WORLD } from '../game/World';
+import { traceBatSilhouette } from '../utils/batEmblem';
 
 const CLOUD_HEIGHT = 1550;
 
@@ -108,19 +109,7 @@ function makeBatSpotTexture(): THREE.CanvasTexture {
   context.globalCompositeOperation = 'destination-out';
   context.translate(256, 262);
   context.scale(1.5, 1.5);
-  context.beginPath();
-  context.moveTo(0, -34);
-  context.bezierCurveTo(6, -26, 18, -30, 30, -22);
-  context.bezierCurveTo(22, -14, 24, -4, 36, 2);
-  context.bezierCurveTo(56, -2, 74, 6, 86, 22);
-  context.bezierCurveTo(64, 20, 46, 26, 34, 38);
-  context.bezierCurveTo(22, 48, 8, 54, 0, 62);
-  context.bezierCurveTo(-8, 54, -22, 48, -34, 38);
-  context.bezierCurveTo(-46, 26, -64, 20, -86, 22);
-  context.bezierCurveTo(-74, 6, -56, -2, -36, 2);
-  context.bezierCurveTo(-24, -4, -22, -14, -30, -22);
-  context.bezierCurveTo(-18, -30, -6, -26, 0, -34);
-  context.closePath();
+  traceBatSilhouette(context);
   context.fill();
 
   const texture = new THREE.CanvasTexture(canvas);

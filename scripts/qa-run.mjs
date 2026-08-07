@@ -1,7 +1,13 @@
 /**
  * Headless QA driver: loads the game, waits through loading, captures phase
- * screenshots (intro, glide, dive, landing, perched), console errors, and
- * renderer diagnostics. Usage: node scripts/qa-run.mjs [url] [outDir]
+ * screenshots (title, glide, dive, approach, landing, complete), console
+ * errors, and renderer diagnostics.
+ *
+ * Usage: node scripts/qa-run.mjs [url] [outDir] [landing]
+ *
+ * Software rendering manages ~1 fps and Loop clamps delta to 50 ms, so the
+ * scripted beats cost minutes of wall clock. Every phase wait is condition-
+ * based with a huge timeout for that reason.
  */
 import { chromium } from '@playwright/test';
 import fs from 'node:fs';
@@ -74,18 +80,15 @@ if (loadingError) {
   process.exit(1);
 }
 
-// Landing-only mode: skip straight to the tower approach.
+// Landing-only mode: skip straight to the pad approach.
 const landingOnly = process.argv[4] === 'landing';
 if (!landingOnly) {
-// Intro beats.
-await page.waitForTimeout(1200);
-await shoot('01-intro-batwing');
-await page.waitForTimeout(3000);
-await shoot('02-intro-freefall');
-await page.waitForTimeout(3200);
-await shoot('03-intro-capesnap');
+// The title screen, with the hero hanging behind it.
+await page.waitForTimeout(1500);
+await shoot('01-title');
 
-// Wait for glide handoff.
+// Start the run. Clicking Start would work too, but the hook is deterministic.
+await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('active-play'));
 await page.waitForFunction(
   () => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'glide',
   undefined,
@@ -110,35 +113,48 @@ await shoot('07-swoop');
 
 }
 
-// Approach the tower for the real landing cinematic.
+// Approach the landing pad, with the objective marker and range panel live.
 await page.evaluate(() => {
-  window.__THREE_GAME_TEST_HOOKS__?.setState('near-tower');
+  window.__THREE_GAME_TEST_HOOKS__?.setState('near-pad');
 });
-await page.waitForTimeout(600);
+await page.waitForTimeout(2000);
 await shoot('08-approach');
+const hudState = await page.evaluate(() => ({
+  distance: document.querySelector('#objective-distance')?.textContent,
+  markerOpacity: document.querySelector('#objective-marker')?.style.opacity,
+  range: document.querySelector('#surveillance-range')?.textContent,
+  rangeActive: document.querySelector('#surveillance-tag')?.classList.contains('active'),
+}));
+console.log('HUD:', JSON.stringify(hudState));
+
+// The landing beat itself.
+await page.evaluate(() => window.__THREE_GAME_TEST_HOOKS__?.setState('land'));
 await page.waitForFunction(
   () => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'landing',
   undefined,
   { timeout: 420000 },
 );
-await page.waitForTimeout(900);
+await page.waitForTimeout(2000);
 await shoot('09-landing');
+
 await page.waitForFunction(
-  () => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'perched',
+  () => window.__THREE_GAME_DIAGNOSTICS__?.phase === 'complete',
   undefined,
   { timeout: 420000 },
 );
-await page.waitForTimeout(1500);
-await shoot('10-perched');
-const promptState = await page.evaluate(() => {
-  const prompt = document.querySelector('#center-prompt');
+// The card fades in over ~1.1s of real time, not simulated time.
+await page.waitForTimeout(2500);
+await shoot('10-complete');
+const cardState = await page.evaluate(() => {
+  const card = document.querySelector('#mission-complete');
   return {
-    text: prompt?.textContent,
-    visible: prompt?.classList.contains('visible'),
-    opacity: prompt ? getComputedStyle(prompt).opacity : null,
+    title: document.querySelector('#mc-title')?.textContent,
+    visible: card?.classList.contains('visible'),
+    opacity: card ? getComputedStyle(card).opacity : null,
+    complete: window.__THREE_GAME_DIAGNOSTICS__?.complete,
   };
 });
-console.log('PROMPT:', JSON.stringify(promptState));
+console.log('CARD:', JSON.stringify(cardState));
 
 console.log('CONSOLE ISSUES:', consoleIssues.length ? consoleIssues.slice(0, 12) : 'none');
 await browser.close();
