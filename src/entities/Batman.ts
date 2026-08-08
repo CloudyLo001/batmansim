@@ -11,7 +11,8 @@ export type BatmanState =
   | 'catch'
   | 'climb'
   | 'impact'
-  | 'perch';
+  | 'perch'
+  | 'stand';
 
 const TARGET_HEIGHT = 2.05;
 
@@ -34,23 +35,30 @@ interface PoseTargets {
   flightPose: number;
   /** Arms swept back toward the body, 0 spread wide .. 1 tucked. */
   armTuck: number;
+  /** Weight of the upright standing pose, 0..1. */
+  stand: number;
   /** Clip to run underneath, if any. */
   clip: BatmanClipRole | null;
 }
 
 const POSES: Record<BatmanState, PoseTargets> = {
-  skydive: { spread: 0.34, prone: 1, flightPose: 0.35, armTuck: 0.55, clip: 'falling' },
-  glide: { spread: 1, prone: 1, flightPose: 1, armTuck: 0, clip: null },
-  dive: { spread: 0.22, prone: 1, flightPose: 1, armTuck: 1, clip: null },
-  flare: { spread: 1.3, prone: 0.15, flightPose: 0.8, armTuck: -0.35, clip: null },
+  skydive: { spread: 0.34, prone: 1, flightPose: 0.35, armTuck: 0.55, stand: 0, clip: 'falling' },
+  glide: { spread: 1, prone: 1, flightPose: 1, armTuck: 0, stand: 0, clip: null },
+  dive: { spread: 0.22, prone: 1, flightPose: 1, armTuck: 1, stand: 0, clip: null },
+  flare: { spread: 1.3, prone: 0.15, flightPose: 0.8, armTuck: -0.35, stand: 0, clip: null },
   // Catch and climb run no clip and no flight pose: the limbs belong to the IK
   // solver, and anything else writing those bones would fight it.
-  catch: { spread: 0.2, prone: 0, flightPose: 0, armTuck: 0, clip: null },
+  catch: { spread: 0.2, prone: 0, flightPose: 0, armTuck: 0, stand: 0, clip: null },
   // Failed catch: limbs flung wide and the cape caught open, so the tumble
   // reads as lost control rather than a held pose.
-  impact: { spread: 0.75, prone: 0.5, flightPose: 0.45, armTuck: -0.7, clip: null },
-  climb: { spread: 0.12, prone: 0, flightPose: 0, armTuck: 0, clip: null },
-  perch: { spread: 0.1, prone: 0, flightPose: 0, armTuck: 0, clip: 'crouch' },
+  impact: { spread: 0.75, prone: 0.5, flightPose: 0.45, armTuck: -0.7, stand: 0, clip: null },
+  climb: { spread: 0.12, prone: 0, flightPose: 0, armTuck: 0, stand: 0, clip: null },
+  perch: { spread: 0.1, prone: 0, flightPose: 0, armTuck: 0, stand: 0, clip: 'crouch' },
+  // Rising out of the perch. Runs no clip — the crouch fades out and this
+  // pose takes over. It has to be authored: with nothing driving the skeleton
+  // it falls back to the bind pose, and this rig binds with the arms straight
+  // out to the sides, which reads as a scarecrow rather than a man standing.
+  stand: { spread: 0.2, prone: 0, flightPose: 0, armTuck: 0, stand: 1, clip: null },
 };
 
 /** Bone names in the skeleton Mint's rigging pass produces. */
@@ -157,7 +165,12 @@ export class Batman {
     }
   }
 
-  setState(state: BatmanState): void {
+  /**
+   * `fadeSeconds` controls the clip crossfade only — the procedural pose still
+   * eases at its own rate. Slow it down for beats meant to be watched, like
+   * rising out of the perch; the default is a quick gameplay-speed blend.
+   */
+  setState(state: BatmanState, fadeSeconds = 0.35): void {
     if (this.state === state) return;
     this.state = state;
     if (state === 'perch') this.impact = 1;
@@ -165,13 +178,13 @@ export class Batman {
     const nextRole = POSES[state].clip;
     if (nextRole === this.activeClip) return;
     const previous = this.activeClip ? this.actions.get(this.activeClip) : null;
-    previous?.fadeOut(0.35);
+    previous?.fadeOut(fadeSeconds);
     const next = nextRole ? this.actions.get(nextRole) : null;
     if (next) {
       const loopOnce = nextRole === 'diveLand';
       next.reset().setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
       next.clampWhenFinished = loopOnce;
-      next.fadeIn(0.35).play();
+      next.fadeIn(fadeSeconds).play();
     }
     this.activeClip = nextRole;
   }
@@ -192,11 +205,13 @@ export class Batman {
     this.pose.prone = this.proneOverride ?? THREE.MathUtils.damp(this.pose.prone, target.prone, lambda, delta);
     this.pose.flightPose = THREE.MathUtils.damp(this.pose.flightPose, target.flightPose, lambda, delta);
     this.pose.armTuck = THREE.MathUtils.damp(this.pose.armTuck, target.armTuck, lambda, delta);
+    this.pose.stand = THREE.MathUtils.damp(this.pose.stand, target.stand, lambda, delta);
     this.impact = Math.max(0, this.impact - delta * 3.4);
 
-    // Clips write the skeleton first; the flight pose then blends over the top.
+    // Clips write the skeleton first; the procedural poses blend over the top.
     this.mixer.update(delta);
     this.applyFlightPose(bank);
+    this.applyStandPose(this.pose.stand);
 
     const airborne = this.pose.prone;
     const bob = Math.sin(this.time * 1.9) * 0.05 * airborne;
@@ -312,6 +327,37 @@ export class Batman {
     this.poseBone(this.rig.spine02, -0.1, bank * 0.12, 0, weight);
     this.poseBone(this.rig.neck, -0.28, 0, 0, weight);
     this.poseBone(this.rig.head, -0.3, bank * 0.18, 0, weight);
+  }
+
+  /**
+   * Upright idle: arms hanging at his sides, legs straight, chin level.
+   *
+   * Blended over whatever the mixer left behind, so ramping the weight from 0
+   * to 1 as the crouch clip fades out is what makes him rise.
+   *
+   * Getting the arms down takes BOTH axes on these bones, composed in the
+   * euler's default XYZ order (so Ry then Rz): Y alone swings the arm through
+   * the horizontal, Z alone tips it up. Verified against the world-space hand
+   * position — hanging correctly means the hand sits ~0.5m BELOW the shoulder.
+   */
+  private applyStandPose(weight: number): void {
+    if (weight <= 0.001) return;
+    const sway = Math.sin(this.time * 0.9) * 0.012;
+
+    this.poseBone(this.rig.leftArm, 0, -1.36, -1.35, weight);
+    this.poseBone(this.rig.rightArm, 0, 1.36, 1.35, weight);
+    this.poseBone(this.rig.leftForeArm, 0, -0.2, -0.1, weight);
+    this.poseBone(this.rig.rightForeArm, 0, 0.2, 0.1, weight);
+
+    this.poseBone(this.rig.leftUpLeg, 0, 0, 0.04, weight);
+    this.poseBone(this.rig.rightUpLeg, 0, 0, -0.04, weight);
+    this.poseBone(this.rig.leftLeg, 0, 0, 0, weight);
+    this.poseBone(this.rig.rightLeg, 0, 0, 0, weight);
+
+    // A trace of breathing sway, so the held shot is not a statue.
+    this.poseBone(this.rig.spine, 0.02 + sway, 0, 0, weight);
+    this.poseBone(this.rig.neck, -0.06, 0, 0, weight);
+    this.poseBone(this.rig.head, -0.04 - sway, 0, 0, weight);
   }
 
   /** Slerps one bone from its bind rotation toward a local euler offset. */

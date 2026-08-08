@@ -437,7 +437,10 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* Top third, not centred: the hero stands in the middle of frame on the
+     landing deck, and a centred card printed straight across his head. */
+  justify-content: flex-start;
+  padding-top: 9vh;
   gap: 18px;
   pointer-events: auto;
   cursor: pointer;

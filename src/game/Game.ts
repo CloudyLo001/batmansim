@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { AdaptiveResolution } from '../core/AdaptiveResolution';
 import { InputController } from '../core/InputController';
 import { Loop } from '../core/Loop';
 import { createRenderer, resizeRenderer } from '../core/Renderer';
@@ -30,14 +31,32 @@ import { WORLD } from './World';
 
 const MAX_DPR = 1.75;
 
+/**
+ * How much the hero is enlarged for the landing beats.
+ *
+ * A cinematic cheat, and it earns its keep: in flight his silhouette is the
+ * ~5.7m spread membrane, but the perch pose furls the cape and crouches him
+ * into a ~1.3m huddle, so at any sane camera distance he reads as an ant on a
+ * 104m deck. Scaling him for these two shots only restores the presence
+ * without touching the flight framing or anything physical.
+ */
+const HERO_CINEMATIC_SCALE = 1.8;
+
+/** Seconds he holds the landing crouch before straightening up. */
+const RISE_DELAY = 0.9;
+
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(55, 1, 0.6, 9000);
+  // Near plane 1.5, not 0.6: without the logarithmic depth buffer the 24-bit
+  // range has to stretch to 9km, and 1.5 gives ~4cm of precision at 1km. The
+  // chase camera sits 9.5m back and nothing comes within ~5m of the lens.
+  private readonly camera = new THREE.PerspectiveCamera(55, 1, 1.5, 9000);
   private readonly input: InputController;
   private readonly hud = new Hud();
   private readonly rig = new CameraRig(this.camera);
   private readonly flight = new FlightModel();
+  private readonly resolution = new AdaptiveResolution(MAX_DPR);
   private readonly loop = new Loop(
     (delta, elapsed) => this.update(delta, elapsed),
     () => this.render(),
@@ -87,6 +106,7 @@ export class Game {
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.renderer = createRenderer(canvas);
+    this.renderer.info.autoReset = false;
     this.renderer.shadowMap.enabled = false;
     this.renderer.toneMappingExposure = 1.18;
     // Fog tinted to the sky's own horizon so distant geometry dissolves into
@@ -218,6 +238,7 @@ export class Game {
     this.titleAnchor.copy(WORLD.jumpPosition).add(this.scratch.set(0, -360, -520));
     this.batman.setState('glide');
     this.batman.proneOverride = null;
+    this.batman.group.scale.setScalar(1);
     this.batman.group.position.copy(this.titleAnchor);
     this.batman.group.rotation.set(0, Math.PI, 0);
     this.batman.resetWing();
@@ -235,6 +256,7 @@ export class Game {
     this.flight.reset(this.titleAnchor, Math.PI, 46);
     this.batman.setState('glide');
     this.batman.proneOverride = null;
+    this.batman.group.scale.setScalar(1);
     this.batman.group.position.copy(this.flight.position);
     this.batman.group.rotation.set(-this.flight.pitch, this.flight.heading, 0);
     this.batman.resetWing();
@@ -290,6 +312,7 @@ export class Game {
 
     this.batman.setState('flare');
     this.batman.proneOverride = null;
+    this.batman.group.scale.setScalar(HERO_CINEMATIC_SCALE);
     this.lightning?.forceStrike();
   }
 
@@ -299,6 +322,8 @@ export class Game {
     this.phase = Phase.Complete;
     this.phaseTime = 0;
     this.batman.setState('perch');
+    // Set here too, not only in beginLanding: the QA hook jumps straight here.
+    this.batman.group.scale.setScalar(HERO_CINEMATIC_SCALE);
     this.rig.addImpulse(0.6);
     this.missionComplete.show();
   }
@@ -327,14 +352,21 @@ export class Game {
     // Keep rendering the current frame while paused so the menu sits over a
     // live image rather than a black canvas.
     if (this.pausedForScreenshot || this.paused) {
+      // Resolution must not drift under QA or a pause, or screenshots and
+      // perf comparisons stop being reproducible.
+      this.resolution.resume();
       this.publishDiagnostics();
       return;
     }
     const animDelta = this.reducedMotion ? 0 : delta;
     this.elapsed = elapsed;
 
-    if (resizeRenderer(this.renderer, this.camera, MAX_DPR)) {
+    // Scale render resolution to hold frame rate. Checked before the resize so
+    // a new target and a window resize collapse into one reallocation.
+    const rescaled = this.resolution.sample();
+    if (resizeRenderer(this.renderer, this.camera, this.resolution.dpr) || rescaled) {
       this.syncPostFxSize();
+      this.resolution.resume();
     }
 
     switch (this.phase) {
@@ -490,25 +522,25 @@ export class Game {
       : this.scratch.set(0, 0, 0);
     batman.update(delta, velocity, 0.4 + Math.sin(eased * Math.PI) * 1.7);
 
-    // Orbit the pad centre from the bearing he came in on. Staying outside
-    // pad.radius is what guarantees the camera never enters the deck.
+    // Orbit HIM, not the pad. Orbiting the pad centre meant a radius of at
+    // least padRadius + 16, i.e. 68m from a 2m figure, and he read as a speck.
+    // The floor on Y is what keeps the camera clear of the deck and its rings.
+    const hero = batman.group.position;
     const baseAngle = Math.atan2(
-      this.landingFrom.x - pad.center.x,
-      this.landingFrom.z - pad.center.z,
+      this.landingFrom.x - this.landingTo.x,
+      this.landingFrom.z - this.landingTo.z,
     );
-    const orbitAngle = baseAngle - 0.7 + settle * 0.7;
-    const radius = pad.radius + THREE.MathUtils.lerp(40, 16, settle);
+    const orbitAngle = baseAngle - 0.55 + settle * 0.55;
+    const radius = THREE.MathUtils.lerp(15, 11, settle);
     this.scratch.set(
-      pad.center.x + Math.sin(orbitAngle) * radius,
-      Math.max(
-        batman.group.position.y + THREE.MathUtils.lerp(16, 3.4, settle),
-        pad.roofY + 3.4,
-      ),
-      pad.center.z + Math.cos(orbitAngle) * radius,
+      hero.x + Math.sin(orbitAngle) * radius,
+      Math.max(hero.y + THREE.MathUtils.lerp(5, 1.7, settle), pad.roofY + 1.9),
+      hero.z + Math.cos(orbitAngle) * radius,
     );
-    this.scratchB.copy(batman.group.position);
-    this.scratchB.y += 1.4;
-    this.rig.setCinematicFrame(this.scratch, this.scratchB, 46);
+    // Aimed at his chest, above the camera's own height, so the lens tilts up
+    // and the storm and skyline sit behind him instead of the deck.
+    this.scratchB.set(hero.x, hero.y + 2.4, hero.z);
+    this.rig.setCinematicFrame(this.scratch, this.scratchB, 42);
 
     if (this.phaseTime >= LANDING_DURATION) this.beginComplete();
   }
@@ -521,19 +553,26 @@ export class Game {
     this.phaseTime += delta;
     const pad = city.landingPad;
 
+    // Hold the landing crouch a beat, then straighten up as the card fades in.
+    // The slow crossfade is the rise: with no clip underneath, the mixer eases
+    // every bone back to its standing bind rotation.
+    if (this.phaseTime > RISE_DELAY) batman.setState('stand', 1.1);
     batman.update(delta, this.scratch.set(0, 0, 0), 0.3);
 
+    const hero = batman.group.position;
     const angle = Math.PI
       + Math.sin(this.phaseTime * 0.11) * 0.22
       + this.phaseTime * 0.03;
-    const radius = pad.radius + 14;
+    const radius = 11.5;
     this.scratch.set(
-      pad.center.x + Math.sin(angle) * radius,
-      pad.roofY + 4.2,
-      pad.center.z + Math.cos(angle) * radius,
+      hero.x + Math.sin(angle) * radius,
+      Math.max(hero.y + 1.5, pad.roofY + 1.9),
+      hero.z + Math.cos(angle) * radius,
     );
-    this.scratchB.set(batman.group.position.x, pad.roofY + 1.3, batman.group.position.z);
-    this.rig.setCinematicFrame(this.scratch, this.scratchB, 44);
+    // Below his eyeline, aimed well above it: tilting up drops the broad lit
+    // deck out of the lower frame and puts the storm and skyline behind him.
+    this.scratchB.set(hero.x, hero.y + 3.2, hero.z);
+    this.rig.setCinematicFrame(this.scratch, this.scratchB, 40);
   }
 
   /**
@@ -586,6 +625,12 @@ export class Game {
   }
 
   private render(): void {
+    // renderer.info resets itself inside EVERY renderer.render(), and the
+    // composer runs each pass as a fullscreen quad — so the counters used to
+    // report only the final OutputPass triangle (calls: 1, triangles: 1).
+    // Reset once here instead, so the totals cover the whole frame. What
+    // publishDiagnostics reports is then the previous frame's complete figures.
+    this.renderer.info.reset();
     if (this.postFx) {
       this.postFx.render(
         this.lastDelta,
@@ -601,8 +646,14 @@ export class Game {
   private syncPostFxSize(): void {
     const width = Math.max(1, this.canvas.clientWidth);
     const height = Math.max(1, this.canvas.clientHeight);
-    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-    this.postFx?.setSize(width, height, dpr);
+    // Must match what resizeRenderer resolved, or the composer's targets and
+    // the canvas disagree and the frame is sampled at the wrong scale.
+    this.postFx?.setSize(width, height, this.effectiveDpr());
+  }
+
+  /** The device pixel ratio actually in use, after adaptive scaling. */
+  private effectiveDpr(): number {
+    return Math.min(window.devicePixelRatio || 1, this.resolution.dpr);
   }
 
   private installTestHooks(): void {
@@ -692,8 +743,9 @@ export class Game {
         clientHeight: this.canvas.clientHeight,
         width: this.canvas.width,
         height: this.canvas.height,
-        dpr: Math.min(window.devicePixelRatio || 1, MAX_DPR),
+        dpr: this.effectiveDpr(),
       },
+      frameMs: this.resolution.frameMs,
       phase: this.phase,
     };
   }

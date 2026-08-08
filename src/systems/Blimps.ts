@@ -1,5 +1,7 @@
 import * as THREE from 'three';
+import { forceFrontSide } from './City';
 import { disposeObject3D } from '../utils/dispose';
+import { makeGlowMaterial, makeGlowPoints } from '../utils/glow';
 
 interface BlimpUnit {
   root: THREE.Group;
@@ -14,18 +16,28 @@ interface BlimpUnit {
 const BLIMP_LENGTH = 170;
 
 /**
- * Patrol blimps drifting on elliptical paths with sweeping searchlight cones
- * (additive fake-volumetric cone + real SpotLight).
+ * Patrol blimps drifting on elliptical paths with sweeping searchlight cones.
+ *
+ * The cones are additive fake-volumetric geometry with NO real lights behind
+ * them. Three blimps used to carry nine lights (a SpotLight and two beacon
+ * PointLights each) — half the scene's entire light budget for three objects
+ * a few hundred pixels across. Three.js forward rendering unrolls every light
+ * into every lit fragment shader and evaluates all of them regardless of
+ * distance, so those nine were charged to every building pixel in the city.
+ * The visible beam never came from the SpotLight, and the running lights are
+ * now sprites, so removing them cost nothing on screen.
  */
 export class Blimps {
   readonly group = new THREE.Group();
 
   private readonly units: BlimpUnit[] = [];
   private readonly coneGeometry: THREE.ConeGeometry;
+  private readonly runningLightMaterial = makeGlowMaterial(0xff3320, 13);
   private readonly coneMaterial: THREE.ShaderMaterial;
 
   constructor(blimpModel: THREE.Object3D, rng: () => number) {
     fit(blimpModel, BLIMP_LENGTH);
+    forceFrontSide(blimpModel);
 
     this.coneGeometry = new THREE.ConeGeometry(52, 420, 24, 1, true);
     this.coneGeometry.translate(0, -210, 0);
@@ -70,18 +82,15 @@ export class Blimps {
       const cone = new THREE.Mesh(this.coneGeometry, this.coneMaterial);
       lightPivot.add(cone);
 
-      const spot = new THREE.SpotLight(0xcfe0ee, 900, 900, Math.PI / 14, 0.55, 1.2);
-      spot.position.set(0, 0, 0);
-      spot.target.position.set(0, -420, 0);
-      lightPivot.add(spot);
-      lightPivot.add(spot.target);
-
-      // Red running lights along the hull, as on real aircraft.
-      const beacon = new THREE.PointLight(0xff3320, 260, 220, 2);
-      beacon.position.set(0, BLIMP_LENGTH * 0.09, -BLIMP_LENGTH * 0.42);
-      const beaconNose = new THREE.PointLight(0xff3320, 180, 180, 2);
-      beaconNose.position.set(0, BLIMP_LENGTH * 0.09, BLIMP_LENGTH * 0.42);
-      root.add(beacon, beaconNose);
+      // Red running lights along the hull, as on real aircraft. Sprites, not
+      // real lights — see the note on the class.
+      root.add(makeGlowPoints(
+        [
+          0, BLIMP_LENGTH * 0.09, -BLIMP_LENGTH * 0.42,
+          0, BLIMP_LENGTH * 0.09, BLIMP_LENGTH * 0.42,
+        ],
+        this.runningLightMaterial,
+      ));
 
       this.group.add(root);
       this.units.push({
@@ -125,6 +134,11 @@ export class Blimps {
   dispose(): void {
     this.coneGeometry.dispose();
     this.coneMaterial.dispose();
+    // Drop the glow sprite before the generic teardown: disposeObject3D
+    // disposes every texture it finds on a material, and this one is the
+    // singleton shared with the city's light points.
+    this.runningLightMaterial.map = null;
+    this.runningLightMaterial.dispose();
     disposeObject3D(this.group);
   }
 }

@@ -28,6 +28,8 @@ interface ThreeGameDiagnostics {
    * loading | title | glide | landing | complete | crash.
    */
   phase: string;
+  /** Smoothed wall-clock frame time in ms, driving adaptive resolution. */
+  frameMs: number;
 }
 
 interface ThreeGameTestHooks {

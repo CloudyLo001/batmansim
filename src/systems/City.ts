@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CONTACT_CLEARANCE, PAD_TOUCH_DEPTH } from '../game/Phases';
 import { WORLD } from '../game/World';
 import { traceBatSilhouette } from '../utils/batEmblem';
+import { makeGlowMaterial, makeGlowPoints } from '../utils/glow';
 
 export interface CityModels {
   spire: THREE.Object3D;
@@ -173,6 +174,7 @@ export class City {
     const towerHeight = 358;
     const tower = models.signalTower;
     fitModel(tower, towerHeight);
+    forceFrontSide(tower);
     const towerRoot = new THREE.Group();
     towerRoot.position.set(WORLD.towerPosition.x, 0, WORLD.towerPosition.z);
     towerRoot.rotation.y = Math.PI; // gargoyle face toward the approach
@@ -328,12 +330,17 @@ export class City {
     // --- Deck. Positioned so its TOP FACE lands exactly on roofY: the collider
     // plane and the visible surface must be the same number or he floats/sinks.
     const deckGeometry = new THREE.CylinderGeometry(padRadius, padRadius + 2, 3, 48);
+    // Rough and near-dielectric, with the environment reflection turned right
+    // down. The perch camera looks across this deck at a grazing angle, where
+    // Fresnel drives reflectance toward 1 and a shinier surface mirrors the
+    // whole sky — the deck came out looking like a snowfield.
     const deckMaterial = new THREE.MeshStandardMaterial({
       color: 0x11181f,
-      roughness: 0.68,
-      metalness: 0.3,
+      roughness: 0.94,
+      metalness: 0.04,
       emissive: 0x0b1c26,
     });
+    deckMaterial.envMapIntensity = 0.25;
     const deck = new THREE.Mesh(deckGeometry, deckMaterial);
     deck.position.y = roofY - 1.5;
     root.add(deck);
@@ -369,11 +376,53 @@ export class City {
     const emblemTexture = makeBatPadTexture();
     // Painted on, not projected: additive blending here stacked on top of the
     // deck lighting and the bloom pass and turned the emblem into a white blob.
-    const emblemMaterial = new THREE.MeshBasicMaterial({
-      map: emblemTexture,
+    // Custom material for one reason: the facing fade.
+    //
+    // This decal is an 80m plane and the perch camera sits 2m above it, so it
+    // is seen almost exactly edge-on. At that incidence texture filtering
+    // smears the bright emblem across its own transparent surround and the
+    // whole plane renders as an opaque pale sheet — the deck looked covered in
+    // snow. alphaTest and disabling mipmaps both failed to stop it. Fading the
+    // decal out as it turns edge-on removes the artifact at its source, and is
+    // what a painted marking should do anyway: you cannot read one side-on.
+    const emblemMaterial = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      opacity: 0.95,
+      uniforms: {
+        uMap: { value: emblemTexture },
+        uOpacity: { value: 0.95 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        varying vec3 vWorldNormal;
+        varying vec3 vWorldPos;
+        void main() {
+          vUv = uv;
+          vec4 world = modelMatrix * vec4(position, 1.0);
+          vWorldPos = world.xyz;
+          vWorldNormal = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * world;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform sampler2D uMap;
+        uniform float uOpacity;
+        varying vec2 vUv;
+        varying vec3 vWorldNormal;
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 texel = texture2D(uMap, vUv);
+          vec3 viewDir = normalize(cameraPosition - vWorldPos);
+          // Tight band, deliberately. The inbound glide reads the deck from
+          // only ~11 degrees up (dot ~0.19) and the emblem has to be crisp
+          // there; the smear that has to die is the far half of the plane seen
+          // from the perch camera, at 2-5 degrees (dot < 0.09).
+          float facing = smoothstep(0.05, 0.16, abs(dot(vWorldNormal, viewDir)));
+          float alpha = texel.a * uOpacity * facing;
+          if (alpha < 0.02) discard;
+          gl_FragColor = vec4(texel.rgb, alpha);
+        }
+      `,
     });
     const emblemGeometry = new THREE.PlaneGeometry(padRadius * 1.55, padRadius * 1.55);
     const emblem = new THREE.Mesh(emblemGeometry, emblemMaterial);
@@ -403,7 +452,7 @@ export class City {
 
     // Enough to lift the deck and the emblem out of the night without washing
     // them out at close range, where the landing camera sits.
-    const padLight = new THREE.PointLight(0x7fd8ff, 260, 520, 2);
+    const padLight = new THREE.PointLight(0x7fd8ff, 240, 520, 2);
     padLight.position.y = roofY + 22;
     root.add(padLight);
 
@@ -438,6 +487,10 @@ export class City {
       const z = Math.sin(angle) * radius;
       const height = this.groundHeightAt(x, z);
       if (height < 40) continue;
+      // NOTE: these caps are on the FLAT coordinate arrays, three floats per
+      // point — so they yield 110 beacons, 500 windows and 240 neon, not 330 /
+      // 1500 / 720. Left as-is deliberately: tripling these clouds would cost
+      // real fill rate, and the city already reads correctly at these counts.
       if (beaconPositions.length < 330 && height > 150 && attempt % 5 === 0) {
         // Beacon sits just above the roofline it belongs to.
         beaconPositions.push(x, height + 6, z);
@@ -601,22 +654,6 @@ export class City {
   }
 }
 
-/** Soft round glow sprite shared by every emissive light point. */
-function makeGlowTexture(): THREE.CanvasTexture {
-  const size = 64;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('Could not create glow texture context.');
-  const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
-  gradient.addColorStop(0, 'rgba(255,255,255,1)');
-  gradient.addColorStop(0.35, 'rgba(255,255,255,0.5)');
-  gradient.addColorStop(1, 'rgba(255,255,255,0)');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, size, size);
-  return new THREE.CanvasTexture(canvas);
-}
 
 /**
  * The bat emblem painted on the landing deck.
@@ -646,31 +683,28 @@ function makeBatPadTexture(): THREE.CanvasTexture {
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 4;
+  // Mipmapped and anisotropic: it is read from hundreds of metres up at a
+  // shallow angle. The material's facing fade handles the near-edge-on case,
+  // so filtering can stay tuned for the view that matters.
+  texture.anisotropy = 16;
   return texture;
 }
 
-let sharedGlowTexture: THREE.CanvasTexture | null = null;
-
-function makeGlowMaterial(color: number, size: number): THREE.PointsMaterial {
-  sharedGlowTexture ??= makeGlowTexture();
-  return new THREE.PointsMaterial({
-    color,
-    size,
-    map: sharedGlowTexture,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    sizeAttenuation: true,
+/**
+ * Turns off back-face rendering on a loaded model.
+ *
+ * Every city GLB declares `"doubleSided": true`, so GLTFLoader hands back
+ * materials with `side: DoubleSide` and each closed building shades its own
+ * interior — double the fragment work for something the player can never see.
+ * Only safe on solids: the cape is a thin sheet and must stay double-sided.
+ */
+export function forceFrontSide(model: THREE.Object3D): void {
+  model.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) material.side = THREE.FrontSide;
   });
-}
-
-function makeGlowPoints(positions: number[], material: THREE.PointsMaterial): THREE.Points {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  const points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  return points;
 }
 
 /** Scale a model so its bounding-box height matches target, base at y=0. */
@@ -687,6 +721,7 @@ function fitModel(model: THREE.Object3D, targetHeight: number): void {
 
 function normalizeModel(model: THREE.Object3D, targetHeight: number): NormalizedModel {
   fitModel(model, targetHeight);
+  forceFrontSide(model);
   model.updateWorldMatrix(true, true);
   const parts: MeshPart[] = [];
   model.traverse((object) => {
